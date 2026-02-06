@@ -6,7 +6,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // API Configuration
 const API_URL = __DEV__ 
-  ? 'http://localhost:8000/api'  // Development
+  ? 'http://localhost:8001/api'  // Development
   : 'https://your-production-api.com/api';  // Production
 
 // Fetch wrapper with auth and error handling
@@ -113,6 +113,18 @@ export const roomAPI = {
 
   getRoom: async (roomId: string) => {
     return apiFetch(`/rooms/${roomId}`);
+  },
+
+  /** Get all tickets in a room (host only) - for admin winner selection */
+  getRoomTickets: async (roomId: string) => {
+    return apiFetch(`/rooms/${roomId}/tickets`);
+  },
+
+  /** Set winning ticket for room (host only) */
+  setRoomAdminTicket: async (roomId: string, ticketId: string) => {
+    return apiFetch(`/rooms/${roomId}/admin-ticket?ticket_id=${encodeURIComponent(ticketId)}`, {
+      method: 'PUT',
+    });
   },
 
   joinRoom: async (roomId: string, password?: string) => {

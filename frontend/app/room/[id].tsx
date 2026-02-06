@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,6 +8,7 @@ import {
   Alert,
   ActivityIndicator,
   Share as RNShare,
+  Platform,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -49,6 +50,8 @@ export default function RoomScreen() {
   const { user } = useAuth();
   const [room, setRoom] = useState<Room | null>(null);
   const [loading, setLoading] = useState(true);
+  const joinCalledRef = useRef(false);
+  const [isSharing, setIsSharing] = useState(false);
 
   useEffect(() => {
     loadRoom();
@@ -58,19 +61,39 @@ export default function RoomScreen() {
       socketService.leaveRoom();
       cleanupSocketListeners();
     };
-  }, []);
+  }, [params.id]);
 
   const loadRoom = async () => {
     try {
       const data = await roomAPI.getRoom(params.id);
       setRoom(data);
-      
-      // Join socket room
-      socketService.joinRoom(params.id);
+
+      // If current user is not in players (e.g. room creator), join via API
+      const isInRoom = data.players?.some((p: { id: string }) => p.id === user?.id);
+      if (user && !isInRoom && !joinCalledRef.current) {
+        joinCalledRef.current = true;
+        try {
+          await roomAPI.joinRoom(
+            params.id,
+            data.room_type === 'private' ? undefined : undefined
+          );
+          const updated = await roomAPI.getRoom(params.id);
+          setRoom(updated);
+        } catch (joinErr: any) {
+          if (joinErr?.message?.includes('Already in room')) {
+            joinCalledRef.current = false;
+          }
+        }
+      }
+
+      if (socketService.isConnected()) {
+        socketService.joinRoom(params.id);
+      }
     } catch (error) {
       console.error('Error loading room:', error);
       Alert.alert('Error', 'Failed to load room');
-      router.back();
+      if (router.canGoBack()) router.back();
+      else router.replace('/lobby');
     } finally {
       setLoading(false);
     }
@@ -140,16 +163,38 @@ export default function RoomScreen() {
   };
 
   const handleShareRoom = async () => {
-    if (!room) return;
+    if (!room || isSharing) return;
 
     const message = room.room_type === 'private'
-      ? `🎲 Join my Tambola game!\n\nRoom: ${room.name}\nCode: ${room.room_code}\nTicket: ₹${room.ticket_price}\nPrize Pool: ₹${room.prize_pool}\n\nDownload the app and join now!`
-      : `🎲 Join my Tambola game!\n\nRoom: ${room.name}\nTicket: ₹${room.ticket_price}\nPrize Pool: ₹${room.prize_pool}\n\nDownload the app and join now!`;
+      ? `🎲 Join my Tambola game!\n\nRoom: ${room.name}\nCode: ${room.room_code}\nTicket: ₹${room.ticket_price}\nPrize Pool: ₹${room.prize_pool ?? 0}\n\nJoin: ${typeof window !== 'undefined' ? window.location.origin + '/room/' + room.id : ''}`
+      : `🎲 Join my Tambola game!\n\nRoom: ${room.name}\nTicket: ₹${room.ticket_price}\nPrize Pool: ₹${room.prize_pool ?? 0}\n\nJoin: ${typeof window !== 'undefined' ? window.location.origin + '/room/' + room.id : ''}`;
 
+    setIsSharing(true);
     try {
-      await RNShare.share({ message });
-    } catch (error) {
-      console.error('Error sharing:', error);
+      if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.share) {
+        await navigator.share({
+          title: 'Join Tambola - ' + room.name,
+          text: message,
+        });
+      } else {
+        await RNShare.share({ message });
+      }
+    } catch (error: any) {
+      if (error?.name !== 'AbortError') {
+        console.error('Error sharing:', error);
+        Alert.alert('Share', 'Could not share. You can copy the room link from the room code.');
+      }
+    } finally {
+      setTimeout(() => setIsSharing(false), 1000);
+    }
+  };
+
+  const handleBack = () => {
+    socketService.leaveRoom();
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/lobby');
     }
   };
 
@@ -164,7 +209,8 @@ export default function RoomScreen() {
           style: 'destructive',
           onPress: () => {
             socketService.leaveRoom();
-            router.back();
+            if (router.canGoBack()) router.back();
+            else router.replace('/lobby');
           },
         },
       ]
@@ -192,11 +238,11 @@ export default function RoomScreen() {
       <SafeAreaView style={styles.safeArea}>
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={handleLeaveRoom}>
+          <TouchableOpacity onPress={handleBack}>
             <MaterialCommunityIcons name="arrow-left" size={28} color="#FFD700" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>{room.name}</Text>
-          <TouchableOpacity onPress={handleShareRoom}>
+          <TouchableOpacity onPress={handleShareRoom} disabled={isSharing}>
             <MaterialCommunityIcons name="share-variant" size={28} color="#FFD700" />
           </TouchableOpacity>
         </View>

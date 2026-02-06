@@ -31,8 +31,20 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
+# Lifespan: startup/shutdown (replaces deprecated on_event)
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app_instance):
+    from socket_handlers import register_socket_events
+    await register_socket_events(sio, db)
+    logging.getLogger(__name__).info("Socket.IO handlers registered")
+    yield
+    # shutdown if needed
+    pass
+
 # Create FastAPI app
-app = FastAPI(title="Tambola Multiplayer API", version="2.0.0")
+app = FastAPI(title="Tambola Multiplayer API", version="2.0.0", lifespan=lifespan)
 
 # Create Socket.IO server
 sio = socketio.AsyncServer(
@@ -366,6 +378,43 @@ async def get_room(
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     return Room(**room)
+
+
+@api_router.get("/rooms/{room_id}/tickets", response_model=List[Ticket])
+async def get_room_tickets(
+    room_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all tickets in a room (host only) - for admin winner selection"""
+    room = await db.rooms.find_one({"id": room_id})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if room["host_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only host can list room tickets")
+    tickets = await db.tickets.find({"room_id": room_id}).to_list(500)
+    return [Ticket(**t) for t in tickets]
+
+
+@api_router.put("/rooms/{room_id}/admin-ticket", response_model=MessageResponse)
+async def set_room_admin_ticket(
+    room_id: str,
+    ticket_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Set the winning ticket for this room (host only)"""
+    room = await db.rooms.find_one({"id": room_id})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if room["host_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only host can set winning ticket")
+    ticket = await db.tickets.find_one({"id": ticket_id, "room_id": room_id})
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found in this room")
+    await db.rooms.update_one(
+        {"id": room_id},
+        {"$set": {"admin_selected_ticket": ticket_id}}
+    )
+    return MessageResponse(message="Winning ticket set", data={"ticket_id": ticket_id})
 
 
 @api_router.post("/rooms/{room_id}/join", response_model=MessageResponse)
@@ -785,20 +834,11 @@ async def get_winners(
     return [Winner(**winner) for winner in winners]
 
 
-# ============= REGISTER SOCKET HANDLERS =============
-from socket_handlers import register_socket_events
-import asyncio
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize socket handlers on startup"""
-    await register_socket_events(sio, db)
-    logger.info("Socket.IO handlers registered")
-
-
 # Include router
 app.include_router(api_router)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(socket_app, host="0.0.0.0", port=8000, reload=True)
+    # Use import string for reload; socket_app is the ASGI app
+    # Changed port to 8001 to avoid conflict with port 8000
+    uvicorn.run("server_multiplayer:socket_app", host="0.0.0.0", port=8001, reload=True)

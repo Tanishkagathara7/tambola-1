@@ -5,7 +5,7 @@ import { io, Socket } from 'socket.io-client';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const SOCKET_URL = __DEV__
-  ? 'http://localhost:8000'  // Development
+  ? 'http://localhost:8001'  // Development
   : 'https://your-production-api.com';  // Production
 
 class SocketService {

@@ -3,16 +3,16 @@ fastapi==0.110.1
 uvicorn==0.25.0
 python-dotenv>=1.0.1
 pymongo==4.5.0
-pydantic>=2.6.4
+pydantic>=1.10.0
 motor==3.3.1
 
 # New dependencies for multiplayer
 python-jose[cryptography]>=3.3.0  # JWT tokens
 passlib[bcrypt]>=1.7.4  # Password hashing
 python-multipart>=0.0.9  # File uploads
-websockets>=12.0  # WebSocket support
-redis>=5.0.0  # Session management & caching
-aioredis>=2.0.1  # Async Redis
+websockets>=11.0  # WebSocket support (uvicorn includes this)
+# redis>=5.0.0  # Session management & caching (optional)
+# aioredis>=2.0.1  # Async Redis (optional)
 python-socketio>=5.11.0  # Socket.io for real-time
 aiofiles>=23.2.1  # Async file operations
 pillow>=10.0.0  # Image processing

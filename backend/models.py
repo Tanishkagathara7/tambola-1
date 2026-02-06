@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from enum import Enum
+import uuid
 
 
 # ============= ENUMS =============
@@ -125,6 +126,7 @@ class Room(BaseModel):
     called_numbers: List[int] = []
     current_number: Optional[int] = None
     winners: List[Dict[str, Any]] = []
+    admin_selected_ticket: Optional[str] = None  # ticket_id for host's winner pick
     created_at: datetime = Field(default_factory=datetime.utcnow)
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -217,6 +219,3 @@ class Token(BaseModel):
 class MessageResponse(BaseModel):
     message: str
     data: Optional[Any] = None
-
-
-import uuid

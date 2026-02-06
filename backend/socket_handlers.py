@@ -4,6 +4,7 @@ Socket.IO Event Handlers for Real-time Gameplay
 import socketio
 from typing import Dict
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +260,3 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
         
         except Exception as e:
             logger.error(f"Start game error: {e}")
-
-
-from datetime import datetime

@@ -125,21 +125,16 @@ export default function CreateRoomScreen() {
       };
 
       const room = await roomAPI.createRoom(roomData);
-      
+      const roomName = room?.name ?? 'Room';
+
+      // Navigate first so we always get to lobby even if Alert callback fails (e.g. on web)
+      router.replace('/lobby');
+
+      // Then show success message (non-blocking)
       Alert.alert(
         'Room Created!',
-        `Room "${room.name}" has been created successfully.`,
-        [
-          {
-            text: 'OK',
-            onPress: () => {
-              router.push({
-                pathname: '/room/[id]',
-                params: { id: room.id },
-              });
-            },
-          },
-        ]
+        `"${roomName}" has been created. You can open it from the lobby.`,
+        [{ text: 'OK' }]
       );
     } catch (error: any) {
       console.error('Error creating room:', error);
@@ -153,7 +148,7 @@ export default function CreateRoomScreen() {
     <LinearGradient colors={['#1a5f1a', '#2d8b2d']} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()}>
+          <TouchableOpacity onPress={() => (router.canGoBack() ? router.back() : router.replace('/lobby'))}>
             <MaterialCommunityIcons name="arrow-left" size={28} color="#FFD700" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Create Room</Text>

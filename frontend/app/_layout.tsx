@@ -20,6 +20,7 @@ export default function RootLayout() {
               <Stack.Screen name="room/game/[id]" />
               <Stack.Screen name="(tabs)" />
               <Stack.Screen name="admin" options={{ presentation: 'modal' }} />
+              <Stack.Screen name="profile" />
               <Stack.Screen name="prize-config" />
               <Stack.Screen name="game" />
               <Stack.Screen name="player-tickets" options={{ presentation: 'card' }} />

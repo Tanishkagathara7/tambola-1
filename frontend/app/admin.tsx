@@ -9,35 +9,97 @@ import {
   ScrollView,
   KeyboardAvoidingView,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
-// Admin screen - fully offline
+import { useAuth } from '../contexts/AuthContext';
+import { roomAPI } from '../services/api';
 
 interface Ticket {
   id: string;
   ticket_number: number;
-  player_id: string;
-  player_name: string;
+  player_id?: string;
+  user_id?: string;
+  player_name?: string;
+  user_name?: string;
   grid: (number | null)[][];
   numbers: number[];
 }
 
+interface RoomItem {
+  id: string;
+  name: string;
+  host_id: string;
+  host_name: string;
+  status: string;
+  current_players: number;
+  max_players: number;
+}
+
 export default function AdminScreen() {
   const router = useRouter();
+  const { user } = useAuth();
   const [authenticated, setAuthenticated] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [selectedTicket, setSelectedTicket] = useState<string | null>(null);
 
+  // Online: rooms from API (games) and tickets for selected room
+  const [rooms, setRooms] = useState<RoomItem[]>([]);
+  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
+  const [roomTickets, setRoomTickets] = useState<Ticket[]>([]);
+  const [loadingRooms, setLoadingRooms] = useState(false);
+  const [loadingTickets, setLoadingTickets] = useState(false);
+
   useEffect(() => {
     loadTickets();
   }, []);
+
+  useEffect(() => {
+    if (authenticated && user) {
+      loadRooms();
+    }
+  }, [authenticated, user]);
+
+  useEffect(() => {
+    if (authenticated && selectedRoomId && user) {
+      loadRoomTickets(selectedRoomId);
+    } else {
+      setRoomTickets([]);
+    }
+  }, [selectedRoomId, authenticated, user]);
+
+  const loadRooms = async () => {
+    if (!user) return;
+    setLoadingRooms(true);
+    try {
+      const list = await roomAPI.getRooms({});
+      setRooms(Array.isArray(list) ? list : []);
+    } catch (e) {
+      console.error('Error loading rooms:', e);
+      setRooms([]);
+    } finally {
+      setLoadingRooms(false);
+    }
+  };
+
+  const loadRoomTickets = async (roomId: string) => {
+    setLoadingTickets(true);
+    try {
+      const list = await roomAPI.getRoomTickets(roomId);
+      setRoomTickets(Array.isArray(list) ? list : []);
+    } catch (e) {
+      console.error('Error loading room tickets:', e);
+      setRoomTickets([]);
+    } finally {
+      setLoadingTickets(false);
+    }
+  };
 
   const loadTickets = async () => {
     try {
@@ -45,7 +107,7 @@ export default function AdminScreen() {
       if (ticketsData) {
         setTickets(JSON.parse(ticketsData));
       }
-      
+
       const adminTicket = await AsyncStorage.getItem('admin_selected_ticket');
       if (adminTicket) {
         setSelectedTicket(adminTicket);
@@ -84,9 +146,27 @@ export default function AdminScreen() {
     );
   };
 
-  const renderTicket = (ticket: Ticket) => {
-    const isSelected = selectedTicket === ticket.id;
-    
+  const handleSelectRoom = (roomId: string) => {
+    setSelectedRoomId(selectedRoomId === roomId ? null : roomId);
+  };
+
+  const handleSetWinnerForRoom = async (roomId: string, ticketId: string) => {
+    try {
+      await roomAPI.setRoomAdminTicket(roomId, ticketId);
+      Alert.alert(
+        'Success',
+        'Winning ticket set for this game. This ticket will have advantage when calling numbers.',
+        [{ text: 'OK' }]
+      );
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to set winning ticket');
+    }
+  };
+
+  const renderTicket = (ticket: Ticket, forRoom?: string) => {
+    const isSelected = forRoom ? false : selectedTicket === ticket.id;
+    const name = ticket.player_name ?? ticket.user_name ?? '—';
+
     return (
       <TouchableOpacity
         key={ticket.id}
@@ -94,13 +174,16 @@ export default function AdminScreen() {
           styles.ticketCard,
           isSelected && styles.ticketCardSelected,
         ]}
-        onPress={() => handleSelectTicket(ticket.id)}
+        onPress={() => {
+          if (forRoom) handleSetWinnerForRoom(forRoom, ticket.id);
+          else handleSelectTicket(ticket.id);
+        }}
       >
         <View style={styles.ticketCardHeader}>
           <Text style={styles.ticketCardTitle}>
             Ticket #{String(ticket.ticket_number).padStart(4, '0')}
           </Text>
-          <Text style={styles.ticketCardPlayer}>{ticket.player_name}</Text>
+          <Text style={styles.ticketCardPlayer}>{name}</Text>
           {isSelected && (
             <MaterialCommunityIcons name="check-circle" size={24} color="#4ECDC4" />
           )}
@@ -193,11 +276,61 @@ export default function AdminScreen() {
         </View>
 
         <ScrollView contentContainerStyle={styles.content}>
+          {/* Online: Game (room) list and winner selection */}
+          {user && (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Games (rooms) – set winner</Text>
+              <View style={styles.infoBox}>
+                <MaterialCommunityIcons name="information" size={24} color="#FFD700" />
+                <Text style={styles.infoText}>
+                  Select a game (room) you host, then tap a ticket to set it as the winning ticket for that game.
+                </Text>
+              </View>
+              {loadingRooms ? (
+                <ActivityIndicator color="#FFD700" style={{ marginVertical: 16 }} />
+              ) : (
+                <View style={styles.roomsList}>
+                  {rooms.filter((r) => r.host_id === user?.id).map((room) => (
+                    <TouchableOpacity
+                      key={room.id}
+                      style={[
+                        styles.roomCard,
+                        selectedRoomId === room.id && styles.roomCardSelected,
+                      ]}
+                      onPress={() => handleSelectRoom(room.id)}
+                    >
+                      <Text style={styles.roomName}>{room.name}</Text>
+                      <Text style={styles.roomMeta}>
+                        ID: {room.id.slice(0, 8)}… · {room.current_players}/{room.max_players} · {room.status}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                  {rooms.filter((r) => r.host_id === user?.id).length === 0 && !loadingRooms && (
+                    <Text style={styles.emptySubtext}>No rooms you host. Create a room first.</Text>
+                  )}
+                </View>
+              )}
+              {selectedRoomId && (
+                <View style={styles.ticketsSection}>
+                  <Text style={styles.sectionTitle}>Tickets in this game</Text>
+                  {loadingTickets ? (
+                    <ActivityIndicator color="#FFD700" style={{ marginVertical: 8 }} />
+                  ) : roomTickets.length === 0 ? (
+                    <Text style={styles.emptySubtext}>No tickets in this room yet.</Text>
+                  ) : (
+                    <View style={styles.ticketsContainer}>
+                      {roomTickets.map((t) => renderTicket(t, selectedRoomId))}
+                    </View>
+                  )}
+                </View>
+              )}
+            </View>
+          )}
+
           <View style={styles.infoBox}>
             <MaterialCommunityIcons name="information" size={24} color="#FFD700" />
             <Text style={styles.infoText}>
-              Select ONE ticket to give it 100% winning advantage. The selected ticket will
-              receive its numbers first, ensuring it completes Full House naturally.
+              Select ONE ticket to give it 100% winning advantage (offline mode below).
             </Text>
           </View>
 
@@ -208,12 +341,12 @@ export default function AdminScreen() {
                 size={80}
                 color="rgba(255,255,255,0.3)"
               />
-              <Text style={styles.emptyText}>No tickets available</Text>
-              <Text style={styles.emptySubtext}>Start a game to select winning ticket</Text>
+              <Text style={styles.emptyText}>No offline tickets</Text>
+              <Text style={styles.emptySubtext}>Use game list above for online rooms</Text>
             </View>
           ) : (
             <View style={styles.ticketsContainer}>
-              {tickets.map(renderTicket)}
+              {tickets.map((t) => renderTicket(t))}
             </View>
           )}
         </ScrollView>
@@ -302,6 +435,43 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 16,
+  },
+  section: {
+    marginBottom: 24,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#FFD700',
+    marginBottom: 12,
+  },
+  roomsList: {
+    gap: 8,
+    marginBottom: 16,
+  },
+  roomCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 8,
+    padding: 12,
+    borderWidth: 2,
+    borderColor: '#FFD700',
+  },
+  roomCardSelected: {
+    backgroundColor: 'rgba(78, 205, 196, 0.2)',
+    borderColor: '#4ECDC4',
+  },
+  roomName: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#FFF',
+  },
+  roomMeta: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.7)',
+    marginTop: 4,
+  },
+  ticketsSection: {
+    marginTop: 12,
   },
   infoBox: {
     flexDirection: 'row',
