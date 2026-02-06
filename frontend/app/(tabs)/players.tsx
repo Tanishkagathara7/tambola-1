@@ -17,8 +17,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
-const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+import { useGameState } from '../../contexts/GameStateContext';
 
 interface Player {
   id: string;
@@ -29,6 +28,7 @@ interface Player {
 
 export default function PlayersScreen() {
   const router = useRouter();
+  const { resetGame } = useGameState();
   const [players, setPlayers] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalVisible, setModalVisible] = useState(false);
@@ -38,13 +38,14 @@ export default function PlayersScreen() {
 
   const fetchPlayers = useCallback(async () => {
     try {
-      const response = await fetch(`${API_URL}/api/players`);
-      const data = await response.json();
-      setPlayers(data);
+      // Load players from AsyncStorage (offline)
+      const playersData = await AsyncStorage.getItem('players');
+      const loadedPlayers: Player[] = playersData ? JSON.parse(playersData) : [];
+      setPlayers(loadedPlayers);
       
       // Load ticket counts from AsyncStorage
       const counts: { [key: string]: number } = {};
-      for (const player of data) {
+      for (const player of loadedPlayers) {
         const saved = await AsyncStorage.getItem(`ticket_count_${player.id}`);
         counts[player.id] = saved ? parseInt(saved) : 1;
       }
@@ -67,15 +68,22 @@ export default function PlayersScreen() {
     }
 
     try {
-      const response = await fetch(`${API_URL}/api/players`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: playerName }),
-      });
-      const newPlayer = await response.json();
-      setPlayers([...players, newPlayer]);
+      // Create player offline
+      const newPlayer: Player = {
+        id: `player_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        name: playerName.trim(),
+        ticket_count: 1,
+        created_at: new Date().toISOString(),
+      };
+      
+      const updatedPlayers = [...players, newPlayer];
+      setPlayers(updatedPlayers);
       setTicketCounts({ ...ticketCounts, [newPlayer.id]: 1 });
+      
+      // Save to AsyncStorage
+      await AsyncStorage.setItem('players', JSON.stringify(updatedPlayers));
       await AsyncStorage.setItem(`ticket_count_${newPlayer.id}`, '1');
+      
       setPlayerName('');
       setModalVisible(false);
     } catch (error) {
@@ -95,10 +103,9 @@ export default function PlayersScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              await fetch(`${API_URL}/api/players/${player.id}`, {
-                method: 'DELETE',
-              });
-              setPlayers(players.filter((p) => p.id !== player.id));
+              const updatedPlayers = players.filter((p) => p.id !== player.id);
+              setPlayers(updatedPlayers);
+              await AsyncStorage.setItem('players', JSON.stringify(updatedPlayers));
               await AsyncStorage.removeItem(`ticket_count_${player.id}`);
             } catch (error) {
               console.error('Error deleting player:', error);
@@ -121,6 +128,10 @@ export default function PlayersScreen() {
       return;
     }
 
+    // Start fresh every time a new game is started
+    await resetGame();
+    await AsyncStorage.multiRemove(['game_state', 'generated_tickets', 'admin_selected_ticket']);
+
     // Save game data to AsyncStorage
     const gameData = {
       players: players.map(p => ({ id: p.id, name: p.name })),
@@ -131,8 +142,22 @@ export default function PlayersScreen() {
     router.push('/game');
   };
 
+  const viewPlayerTickets = (player: Player) => {
+    router.push({
+      pathname: '/player-tickets',
+      params: {
+        playerId: player.id,
+        playerName: player.name,
+      },
+    });
+  };
+
   const renderPlayer = ({ item }: { item: Player }) => (
-    <View style={styles.playerCard}>
+    <TouchableOpacity
+      style={styles.playerCard}
+      onPress={() => viewPlayerTickets(item)}
+      activeOpacity={0.7}
+    >
       <View style={styles.playerInfo}>
         <MaterialCommunityIcons name="account" size={40} color="#FFD700" />
         <View style={styles.playerDetails}>
@@ -146,14 +171,20 @@ export default function PlayersScreen() {
       <View style={styles.ticketControls}>
         <TouchableOpacity
           style={styles.controlButton}
-          onPress={() => updateTicketCount(item.id, (ticketCounts[item.id] || 1) - 1)}
+          onPress={(e) => {
+            e.stopPropagation();
+            updateTicketCount(item.id, (ticketCounts[item.id] || 1) - 1);
+          }}
         >
           <MaterialCommunityIcons name="minus" size={24} color="#FFF" />
         </TouchableOpacity>
         <Text style={styles.ticketCount}>{ticketCounts[item.id] || 1}</Text>
         <TouchableOpacity
           style={styles.controlButton}
-          onPress={() => updateTicketCount(item.id, (ticketCounts[item.id] || 1) + 1)}
+          onPress={(e) => {
+            e.stopPropagation();
+            updateTicketCount(item.id, (ticketCounts[item.id] || 1) + 1);
+          }}
         >
           <MaterialCommunityIcons name="plus" size={24} color="#FFF" />
         </TouchableOpacity>
@@ -161,11 +192,15 @@ export default function PlayersScreen() {
 
       <TouchableOpacity
         style={styles.deleteButton}
-        onPress={() => handleDeletePlayer(item)}
+        onPress={(e) => {
+          e.stopPropagation();
+          handleDeletePlayer(item);
+        }}
       >
         <MaterialCommunityIcons name="delete" size={24} color="#FF4444" />
       </TouchableOpacity>
-    </View>
+      <MaterialCommunityIcons name="chevron-right" size={24} color="#FFD700" />
+    </TouchableOpacity>
   );
 
   if (loading) {

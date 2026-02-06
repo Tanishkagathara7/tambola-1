@@ -16,7 +16,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+// Admin screen - fully offline
 
 interface Ticket {
   id: string;
@@ -57,13 +57,13 @@ export default function AdminScreen() {
 
   const handleLogin = async () => {
     try {
-      const response = await fetch(
-        `${API_URL}/api/admin/verify?username=${username}&password=${password}`,
-        { method: 'POST' }
-      );
-      const data = await response.json();
+      // Offline authentication - check local password
+      // Default password stored locally
+      const storedPassword = await AsyncStorage.getItem('admin_password');
+      const defaultPassword = 'admin@123';
+      const correctPassword = storedPassword || defaultPassword;
       
-      if (data.authenticated) {
+      if (username.toLowerCase() === 'admin' && password === correctPassword) {
         setAuthenticated(true);
       } else {
         Alert.alert('Error', 'Invalid credentials');

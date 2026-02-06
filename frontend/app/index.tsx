@@ -1,14 +1,56 @@
-import React, { useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Image } from 'react-native';
+import React, { useEffect, useState, useRef } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Image, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 export default function HomeScreen() {
   const router = useRouter();
+  const [logoPressStart, setLogoPressStart] = useState<number | null>(null);
+  const [versionTapCount, setVersionTapCount] = useState(0);
+  const versionTapTimeout = useRef<NodeJS.Timeout | null>(null);
 
   const handleStart = () => {
     router.push('/(tabs)/players');
+  };
+
+  const handleLogoLongPress = () => {
+    const startTime = Date.now();
+    setLogoPressStart(startTime);
+    
+    setTimeout(() => {
+      if (Date.now() - startTime >= 5000) {
+        // 5 seconds long press detected
+        router.push('/admin');
+        setLogoPressStart(null);
+      }
+    }, 5000);
+  };
+
+  const handleLogoPressOut = () => {
+    setLogoPressStart(null);
+  };
+
+  const handleVersionTap = () => {
+    const newCount = versionTapCount + 1;
+    setVersionTapCount(newCount);
+
+    if (newCount >= 7) {
+      // 7 taps detected
+      router.push('/admin');
+      setVersionTapCount(0);
+      if (versionTapTimeout.current) {
+        clearTimeout(versionTapTimeout.current);
+      }
+    } else {
+      // Reset counter after 2 seconds of inactivity
+      if (versionTapTimeout.current) {
+        clearTimeout(versionTapTimeout.current);
+      }
+      versionTapTimeout.current = setTimeout(() => {
+        setVersionTapCount(0);
+      }, 2000);
+    }
   };
 
   return (
@@ -19,9 +61,16 @@ export default function HomeScreen() {
       <View style={styles.content}>
         {/* Logo/Title */}
         <View style={styles.logoContainer}>
-          <MaterialCommunityIcons name="ticket" size={80} color="#FFD700" />
-          <Text style={styles.title}>TAMBOLA</Text>
-          <Text style={styles.subtitle}>Housie Book</Text>
+          <TouchableOpacity
+            onLongPress={handleLogoLongPress}
+            onPressOut={handleLogoPressOut}
+            delayLongPress={5000}
+            activeOpacity={1}
+          >
+            <MaterialCommunityIcons name="ticket" size={80} color="#FFD700" />
+            <Text style={styles.title}>TAMBOLA</Text>
+            <Text style={styles.subtitle}>Housie Book</Text>
+          </TouchableOpacity>
         </View>
 
         {/* Description */}
@@ -47,7 +96,10 @@ export default function HomeScreen() {
         </TouchableOpacity>
 
         {/* Footer */}
-        <Text style={styles.footer}>Tap to Begin</Text>
+        <TouchableOpacity onPress={handleVersionTap} activeOpacity={1}>
+          <Text style={styles.footer}>Tap to Begin</Text>
+          <Text style={styles.version}>v1.0</Text>
+        </TouchableOpacity>
       </View>
     </LinearGradient>
   );
@@ -140,5 +192,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: 'rgba(255, 255, 255, 0.7)',
     marginTop: 32,
+  },
+  version: {
+    fontSize: 10,
+    color: 'rgba(255, 255, 255, 0.3)',
+    marginTop: 4,
+    textAlign: 'center',
   },
 });

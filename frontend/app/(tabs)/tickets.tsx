@@ -12,8 +12,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
-const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+import { useGameState } from '../../contexts/GameStateContext';
 
 interface Ticket {
   id: string;
@@ -25,6 +24,7 @@ interface Ticket {
 }
 
 export default function TicketsScreen() {
+  const { gameState } = useGameState();
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
   const [groupedTickets, setGroupedTickets] = useState<{ [key: string]: Ticket[] }>({});
@@ -32,6 +32,14 @@ export default function TicketsScreen() {
   useEffect(() => {
     loadTickets();
   }, []);
+
+  // Reload when game state changes to update highlights
+  useEffect(() => {
+    // Force re-render when called numbers change
+    if (gameState.calledNumbers.length > 0 || gameState.currentNumber) {
+      // Tickets will automatically update highlights via gameState
+    }
+  }, [gameState.calledNumbers, gameState.currentNumber]);
 
   const loadTickets = async () => {
     try {
@@ -57,11 +65,31 @@ export default function TicketsScreen() {
     }
   };
 
-  const renderTicketCell = (value: number | null, colIndex: number) => {
-    const bgColor = value === null ? 'transparent' : '#FFD700';
+  const renderTicketCell = (value: number | null, colIndex: number, ticketId: string, rowIndex: number) => {
+    const isCalled = value !== null && gameState.calledNumbers.includes(value);
+    const isCurrent = value === gameState.currentNumber;
+    
     return (
-      <View key={colIndex} style={[styles.cell, { backgroundColor: bgColor }]}>
-        {value !== null && <Text style={styles.cellText}>{value}</Text>}
+      <View
+        key={`${ticketId}-${rowIndex}-${colIndex}`}
+        style={[
+          styles.cell,
+          value !== null && styles.cellFilled,
+          isCalled && styles.cellCalled,
+          isCurrent && styles.cellCurrent,
+        ]}
+      >
+        {value !== null && (
+          <Text
+            style={[
+              styles.cellText,
+              isCalled && styles.cellTextCalled,
+              isCurrent && styles.cellTextCurrent,
+            ]}
+          >
+            {value}
+          </Text>
+        )}
       </View>
     );
   };
@@ -256,9 +284,27 @@ const styles = StyleSheet.create({
     borderWidth: 0.5,
     borderColor: '#DDD',
   },
+  cellFilled: {
+    backgroundColor: '#FFD700',
+  },
+  cellCalled: {
+    backgroundColor: '#4ECDC4',
+  },
+  cellCurrent: {
+    backgroundColor: '#FF6B35',
+    borderWidth: 2,
+    borderColor: '#FFF',
+  },
   cellText: {
     fontSize: 10,
     fontWeight: 'bold',
     color: '#1a5f1a',
+  },
+  cellTextCalled: {
+    color: '#FFF',
+  },
+  cellTextCurrent: {
+    color: '#FFF',
+    fontSize: 12,
   },
 });

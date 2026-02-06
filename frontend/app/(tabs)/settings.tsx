@@ -21,26 +21,10 @@ export default function SettingsScreen() {
     const newCount = secretTapCount + 1;
     setSecretTapCount(newCount);
 
-    if (newCount === 5) {
-      // Unlock admin panel after 5 taps
-      Alert.alert(
-        'Admin Access',
-        'Enter admin credentials',
-        [
-          {
-            text: 'Cancel',
-            style: 'cancel',
-            onPress: () => setSecretTapCount(0),
-          },
-          {
-            text: 'Access',
-            onPress: () => {
-              router.push('/admin');
-              setSecretTapCount(0);
-            },
-          },
-        ]
-      );
+    if (newCount >= 7) {
+      // Unlock admin panel after 7 taps
+      router.push('/admin');
+      setSecretTapCount(0);
     }
 
     // Reset counter after 2 seconds of inactivity
@@ -146,14 +130,13 @@ export default function SettingsScreen() {
             </View>
           </View>
 
-          {/* Secret Admin Access */}
+          {/* Secret Admin Access - Tap version text 7 times */}
           <TouchableOpacity
             style={styles.secretButton}
             onPress={handleSecretAccess}
             activeOpacity={1}
           >
-            <MaterialCommunityIcons name="shield-lock" size={16} color="rgba(255,255,255,0.2)" />
-            <Text style={styles.secretText}>Admin</Text>
+            <Text style={styles.appVersion}>Housie Book v1.0</Text>
           </TouchableOpacity>
 
           {/* Footer */}

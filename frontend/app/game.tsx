@@ -4,62 +4,69 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  FlatList,
   Alert,
   ScrollView,
   Dimensions,
-  Modal,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Speech from 'expo-speech';
+import { useGameState } from '../contexts/GameStateContext';
+import { generateTicketsForPlayers, Ticket } from '../utils/ticketGenerator';
 
-const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const { width } = Dimensions.get('window');
+const AUTO_SPEED_SECONDS = 5;
 
-interface Ticket {
+interface Player {
   id: string;
-  ticket_number: number;
-  player_id: string;
-  player_name: string;
-  grid: (number | null)[][];
-  numbers: number[];
-}
-
-interface GameData {
-  id: string;
-  players: any[];
-  tickets: Ticket[];
-  called_numbers: number[];
-  current_number: number | null;
-  game_mode: string;
-  auto_speed: number;
-  admin_selected_ticket: string | null;
+  name: string;
 }
 
 export default function GameScreen() {
   const router = useRouter();
-  const [game, setGame] = useState<GameData | null>(null);
+  const { gameState, callNumber, setAutoCalling, initializeGame, resetGame } = useGameState();
+  const [game, setGame] = useState<{ players: Player[]; tickets: Ticket[] } | null>(null);
   const [loading, setLoading] = useState(true);
-  const [calledNumbers, setCalledNumbers] = useState<number[]>([]);
-  const [currentNumber, setCurrentNumber] = useState<number | null>(null);
-  const [gameMode, setGameMode] = useState<'manual' | 'auto'>('manual');
-  const [autoSpeed, setAutoSpeed] = useState(3); // seconds
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [ticketsModalVisible, setTicketsModalVisible] = useState(false);
-  const [selectedTickets, setSelectedTickets] = useState<Ticket[]>([]);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    initializeGame();
+    initializeGameOffline();
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, []);
 
-  const initializeGame = async () => {
+  // Sync local state with GameState
+  useEffect(() => {
+    if (gameState.isAutoCalling && !intervalRef.current) {
+      // Start auto calling
+      intervalRef.current = setInterval(() => {
+        callNumber();
+      }, AUTO_SPEED_SECONDS * 1000);
+    } else if (!gameState.isAutoCalling && intervalRef.current) {
+      // Stop auto calling
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+  }, [gameState.isAutoCalling, callNumber]);
+
+  // Speak the number whenever it changes (offline TTS)
+  useEffect(() => {
+    const n = gameState.currentNumber;
+    if (n === null) return;
+
+    try {
+      Speech.stop();
+      Speech.speak(String(n), { rate: 0.9 });
+    } catch (e) {
+      // no-op (TTS may be unavailable on some devices/emulators)
+    }
+  }, [gameState.currentNumber]);
+
+  const initializeGameOffline = async () => {
     try {
       const gameDataStr = await AsyncStorage.getItem('current_game');
       if (!gameDataStr) {
@@ -70,42 +77,20 @@ export default function GameScreen() {
 
       const gameData = JSON.parse(gameDataStr);
       
-      // Generate tickets
-      const response = await fetch(`${API_URL}/api/tickets/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          players: gameData.players,
-          tickets_per_player: gameData.ticketCounts,
-        }),
-      });
-
-      const ticketsData = await response.json();
-      const tickets = ticketsData.tickets;
-
-      // Create game
-      const gameResponse = await fetch(`${API_URL}/api/games`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          players: gameData.players,
-          tickets_per_player: gameData.ticketCounts,
-        }),
-      });
-
-      const createdGame = await gameResponse.json();
-      setGame(createdGame);
-      
-      // Save tickets locally
+      // Generate tickets offline (fresh tickets per new game start)
+      const tickets = generateTicketsForPlayers(gameData.players, gameData.ticketCounts);
       await AsyncStorage.setItem('generated_tickets', JSON.stringify(tickets));
+
+      // Create game object
+      const gameObj = {
+        players: gameData.players,
+        tickets: tickets,
+      };
+      setGame(gameObj);
       
-      // Check for admin selected ticket
-      const adminTicket = await AsyncStorage.getItem('admin_selected_ticket');
-      if (adminTicket) {
-        await fetch(`${API_URL}/api/games/${createdGame.id}/admin-ticket?ticket_id=${adminTicket}`, {
-          method: 'PUT',
-        });
-      }
+      // Initialize game state (fresh)
+      const gameId = `game_${Date.now()}`;
+      await initializeGame(gameId);
     } catch (error) {
       console.error('Error initializing game:', error);
       Alert.alert('Error', 'Failed to initialize game');
@@ -114,67 +99,54 @@ export default function GameScreen() {
     }
   };
 
-  const callNumber = async () => {
-    if (!game) return;
-
-    try {
-      const adminTicket = await AsyncStorage.getItem('admin_selected_ticket');
-      const mode = adminTicket ? 'smart' : 'random';
-      
-      const response = await fetch(`${API_URL}/api/games/${game.id}/call-number`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ game_id: game.id, mode }),
-      });
-
-      const data = await response.json();
-      
-      if (data.number) {
-        setCurrentNumber(data.number);
-        setCalledNumbers(data.called_numbers);
-      } else {
-        Alert.alert('Game Complete', 'All numbers have been called!');
-        setIsPlaying(false);
-        if (intervalRef.current) clearInterval(intervalRef.current);
-      }
-    } catch (error) {
-      console.error('Error calling number:', error);
+  const handleCallNumber = async () => {
+    if (gameState.calledNumbers.length >= 90) {
+      Alert.alert('Game Complete', 'All numbers have been called!');
+      await setAutoCalling(false);
+      return;
     }
+    await callNumber();
   };
 
-  const toggleAutoMode = () => {
-    if (isPlaying) {
+  const toggleAutoMode = async () => {
+    if (gameState.isAutoCalling) {
       // Stop
-      setIsPlaying(false);
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
+      await setAutoCalling(false);
     } else {
       // Start
-      setIsPlaying(true);
-      callNumber(); // Call first number immediately
-      intervalRef.current = setInterval(() => {
-        callNumber();
-      }, autoSpeed * 1000);
+      await setAutoCalling(true);
+      await handleCallNumber(); // Call first number immediately
     }
   };
 
-  const handleSpeedChange = (speed: number) => {
-    setAutoSpeed(speed);
-    if (isPlaying) {
-      // Restart interval with new speed
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      intervalRef.current = setInterval(() => {
-        callNumber();
-      }, speed * 1000);
+  const endGameAndGoToPlayers = async () => {
+    await setAutoCalling(false);
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
     }
+    Speech.stop();
+
+    await resetGame();
+    await AsyncStorage.multiRemove(['current_game', 'generated_tickets', 'admin_selected_ticket']);
+    router.replace('/(tabs)/players');
   };
 
-  const viewTickets = (playerName: string) => {
-    const tickets = game?.tickets.filter(t => t.player_name === playerName) || [];
-    setSelectedTickets(tickets);
-    setTicketsModalVisible(true);
+  const handleEndGame = () => {
+    Alert.alert('End Game', 'End the current game and start a new one?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'End Game', style: 'destructive', onPress: endGameAndGoToPlayers },
+    ]);
+  };
+
+  const viewPlayerTickets = (player: Player) => {
+    router.push({
+      pathname: '/player-tickets',
+      params: {
+        playerId: player.id,
+        playerName: player.name,
+      },
+    });
   };
 
   const renderNumberGrid = () => {
@@ -193,14 +165,14 @@ export default function GameScreen() {
                 key={num}
                 style={[
                   styles.numberCell,
-                  calledNumbers.includes(num) && styles.numberCellCalled,
-                  currentNumber === num && styles.numberCellCurrent,
+                  gameState.calledNumbers.includes(num) && styles.numberCellCalled,
+                  gameState.currentNumber === num && styles.numberCellCurrent,
                 ]}
               >
                 <Text
                   style={[
                     styles.numberText,
-                    calledNumbers.includes(num) && styles.numberTextCalled,
+                    gameState.calledNumbers.includes(num) && styles.numberTextCalled,
                   ]}
                 >
                   {num}
@@ -213,43 +185,10 @@ export default function GameScreen() {
     );
   };
 
-  const renderTicket = (ticket: Ticket) => (
-    <View key={ticket.id} style={styles.miniTicketContainer}>
-      <View style={styles.miniTicketHeader}>
-        <Text style={styles.miniTicketNumber}>#{String(ticket.ticket_number).padStart(4, '0')}</Text>
-      </View>
-      <View style={styles.miniTicketGrid}>
-        {ticket.grid.map((row, rowIndex) => (
-          <View key={rowIndex} style={styles.miniRow}>
-            {row.map((cell, colIndex) => {
-              const isCalled = cell !== null && calledNumbers.includes(cell);
-              return (
-                <View
-                  key={colIndex}
-                  style={[
-                    styles.miniCell,
-                    cell !== null && styles.miniCellFilled,
-                    isCalled && styles.miniCellCalled,
-                  ]}
-                >
-                  {cell !== null && (
-                    <Text style={[styles.miniCellText, isCalled && styles.miniCellTextCalled]}>
-                      {cell}
-                    </Text>
-                  )}
-                </View>
-              );
-            })}
-          </View>
-        ))}
-      </View>
-    </View>
-  );
-
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <Text style={styles.loadingText}>Generating Tickets...</Text>
+        <Text style={styles.loadingText}>Initializing Game...</Text>
       </View>
     );
   }
@@ -264,7 +203,10 @@ export default function GameScreen() {
           </TouchableOpacity>
           <Text style={styles.headerTitle}>TAMBOLA GAME</Text>
           <View style={styles.headerRight}>
-            <Text style={styles.calledCount}>{calledNumbers.length}/90</Text>
+            <Text style={styles.calledCount}>{gameState.calledNumbers.length}/90</Text>
+            <TouchableOpacity onPress={handleEndGame} style={styles.endGameButton}>
+              <MaterialCommunityIcons name="flag-checkered" size={22} color="#FFD700" />
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -274,7 +216,7 @@ export default function GameScreen() {
             <Text style={styles.currentNumberLabel}>Current Number</Text>
             <View style={styles.currentNumberCircle}>
               <Text style={styles.currentNumberText}>
-                {currentNumber || '--'}
+                {gameState.currentNumber || '--'}
               </Text>
             </View>
           </View>
@@ -283,53 +225,32 @@ export default function GameScreen() {
           <View style={styles.controls}>
             <TouchableOpacity
               style={[styles.controlButton, styles.manualButton]}
-              onPress={callNumber}
-              disabled={isPlaying}
+              onPress={handleCallNumber}
+              disabled={gameState.isAutoCalling}
             >
               <MaterialCommunityIcons name="hand-pointing-right" size={24} color="#FFF" />
               <Text style={styles.controlButtonText}>Call Number</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={[styles.controlButton, isPlaying ? styles.stopButton : styles.autoButton]}
+              style={[styles.controlButton, gameState.isAutoCalling ? styles.stopButton : styles.autoButton]}
               onPress={toggleAutoMode}
             >
               <MaterialCommunityIcons
-                name={isPlaying ? 'stop' : 'play'}
+                name={gameState.isAutoCalling ? 'stop' : 'play'}
                 size={24}
                 color="#FFF"
               />
               <Text style={styles.controlButtonText}>
-                {isPlaying ? 'Stop Auto' : 'Auto Mode'}
+                {gameState.isAutoCalling ? `Auto (${AUTO_SPEED_SECONDS}s)` : 'Auto Mode'}
               </Text>
             </TouchableOpacity>
           </View>
 
-          {/* Speed Control */}
-          {gameMode === 'auto' && (
-            <View style={styles.speedControl}>
-              <Text style={styles.speedLabel}>Speed:</Text>
-              {[1, 2, 3, 5].map((speed) => (
-                <TouchableOpacity
-                  key={speed}
-                  style={[
-                    styles.speedButton,
-                    autoSpeed === speed && styles.speedButtonActive,
-                  ]}
-                  onPress={() => handleSpeedChange(speed)}
-                >
-                  <Text
-                    style={[
-                      styles.speedButtonText,
-                      autoSpeed === speed && styles.speedButtonTextActive,
-                    ]}
-                  >
-                    {speed}s
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
+          <View style={styles.autoHint}>
+            <MaterialCommunityIcons name="volume-high" size={18} color="#FFD700" />
+            <Text style={styles.autoHintText}>Auto mode announces numbers every {AUTO_SPEED_SECONDS} seconds</Text>
+          </View>
 
           {/* Number Grid */}
           <View style={styles.section}>
@@ -346,39 +267,17 @@ export default function GameScreen() {
                 <TouchableOpacity
                   key={player.id}
                   style={styles.playerCard}
-                  onPress={() => viewTickets(player.name)}
+                  onPress={() => viewPlayerTickets(player)}
                 >
                   <MaterialCommunityIcons name="account" size={32} color="#FFD700" />
                   <Text style={styles.playerCardName}>{player.name}</Text>
                   <Text style={styles.playerCardTickets}>{playerTickets.length} tickets</Text>
+                  <MaterialCommunityIcons name="chevron-right" size={24} color="#FFD700" />
                 </TouchableOpacity>
               );
             })}
           </View>
         </ScrollView>
-
-        {/* Tickets Modal */}
-        <Modal
-          visible={ticketsModalVisible}
-          animationType="slide"
-          onRequestClose={() => setTicketsModalVisible(false)}
-        >
-          <LinearGradient colors={['#1a5f1a', '#2d8b2d']} style={styles.modalContainer}>
-            <SafeAreaView style={styles.modalSafeArea}>
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Tickets</Text>
-                <TouchableOpacity onPress={() => setTicketsModalVisible(false)}>
-                  <MaterialCommunityIcons name="close" size={28} color="#FFD700" />
-                </TouchableOpacity>
-              </View>
-              <ScrollView contentContainerStyle={styles.modalContent}>
-                <View style={styles.ticketsGrid}>
-                  {selectedTickets.map(renderTicket)}
-                </View>
-              </ScrollView>
-            </SafeAreaView>
-          </LinearGradient>
-        </Modal>
       </SafeAreaView>
     </LinearGradient>
   );
@@ -419,13 +318,19 @@ const styles = StyleSheet.create({
     color: '#FFD700',
   },
   headerRight: {
-    width: 60,
+    width: 90,
     alignItems: 'flex-end',
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
   },
   calledCount: {
     fontSize: 16,
     fontWeight: 'bold',
     color: '#FFD700',
+  },
+  endGameButton: {
+    padding: 6,
   },
   content: {
     padding: 16,
@@ -488,36 +393,21 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#FFF',
   },
-  speedControl: {
+  autoHint: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     marginBottom: 16,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    padding: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    padding: 10,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 215, 0, 0.35)',
   },
-  speedLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#FFF',
-  },
-  speedButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 6,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  speedButtonActive: {
-    backgroundColor: '#FFD700',
-  },
-  speedButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#FFF',
-  },
-  speedButtonTextActive: {
-    color: '#1a5f1a',
+  autoHintText: {
+    flex: 1,
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.85)',
   },
   section: {
     marginBottom: 24,
@@ -582,78 +472,5 @@ const styles = StyleSheet.create({
   playerCardTickets: {
     fontSize: 14,
     color: 'rgba(255, 255, 255, 0.7)',
-  },
-  modalContainer: {
-    flex: 1,
-  },
-  modalSafeArea: {
-    flex: 1,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 16,
-    borderBottomWidth: 2,
-    borderBottomColor: '#FFD700',
-  },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#FFD700',
-  },
-  modalContent: {
-    padding: 16,
-  },
-  ticketsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-  },
-  miniTicketContainer: {
-    backgroundColor: '#FFF',
-    borderRadius: 8,
-    overflow: 'hidden',
-    width: (width - 48) / 2,
-    borderWidth: 2,
-    borderColor: '#1a5f1a',
-  },
-  miniTicketHeader: {
-    backgroundColor: '#1a5f1a',
-    padding: 8,
-    alignItems: 'center',
-  },
-  miniTicketNumber: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#FFD700',
-  },
-  miniTicketGrid: {
-    padding: 4,
-  },
-  miniRow: {
-    flexDirection: 'row',
-  },
-  miniCell: {
-    flex: 1,
-    aspectRatio: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 0.5,
-    borderColor: '#DDD',
-  },
-  miniCellFilled: {
-    backgroundColor: '#FFD700',
-  },
-  miniCellCalled: {
-    backgroundColor: '#4ECDC4',
-  },
-  miniCellText: {
-    fontSize: 9,
-    fontWeight: 'bold',
-    color: '#1a5f1a',
-  },
-  miniCellTextCalled: {
-    color: '#FFF',
   },
 });
