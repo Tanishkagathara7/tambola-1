@@ -188,6 +188,30 @@ class SocketService {
   }
 
   /**
+   * Pause/Resume game (host only)
+   */
+  pauseGame(roomId: string) {
+    if (!this.socket?.connected) {
+      console.error('Socket not connected');
+      return;
+    }
+
+    this.socket.emit('pause_game', { room_id: roomId });
+  }
+
+  /**
+   * End game (host only)
+   */
+  endGame(roomId: string) {
+    if (!this.socket?.connected) {
+      console.error('Socket not connected');
+      return;
+    }
+
+    this.socket.emit('end_game', { room_id: roomId });
+  }
+
+  /**
    * Listen to an event
    */
   on(event: string, callback: (data: any) => void) {

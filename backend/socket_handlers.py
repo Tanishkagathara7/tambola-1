@@ -185,12 +185,46 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
                 }
             )
             
+            # Check if all numbers have been called
+            game_complete = len(called_numbers) >= 90
+            
             # Broadcast to all players in room
             await sio.emit('number_called', {
                 'number': number,
                 'called_numbers': called_numbers,
-                'remaining': 90 - len(called_numbers)
+                'remaining': 90 - len(called_numbers),
+                'game_complete': game_complete
             }, room=room_id)
+            
+            # If game complete, trigger end game
+            if game_complete:
+                await db.rooms.update_one(
+                    {"id": room_id},
+                    {"$set": {"status": "completed", "completed_at": datetime.utcnow()}}
+                )
+                
+                # Get winners and rankings
+                winners = await db.winners.find({"room_id": room_id}).to_list(1000)
+                prize_order = {
+                    'early_five': 1,
+                    'top_line': 2,
+                    'middle_line': 3,
+                    'bottom_line': 4,
+                    'four_corners': 5,
+                    'full_house': 6
+                }
+                sorted_winners = sorted(winners, key=lambda w: (
+                    prize_order.get(w['prize_type'], 999),
+                    w['claimed_at']
+                ))
+                
+                serialized_winners = [serialize_doc(w) for w in sorted_winners]
+                
+                await sio.emit('game_ended', {
+                    'room_id': room_id,
+                    'winners': serialized_winners,
+                    'completed_at': str(datetime.utcnow())
+                }, room=room_id)
             
             logger.info(f"Number {number} called in room {room_id}")
         
@@ -266,24 +300,145 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
                 await sio.emit('error', {'message': 'Only host can start game'}, room=sid)
                 return
             
+            # Check if players have tickets
+            tickets_count = await db.tickets.count_documents({"room_id": room_id})
+            if tickets_count == 0:
+                await sio.emit('error', {'message': 'No tickets purchased yet'}, room=sid)
+                return
+            
             # Update room status
             await db.rooms.update_one(
                 {"id": room_id},
                 {
                     "$set": {
                         "status": "active",
-                        "started_at": datetime.utcnow()
+                        "started_at": datetime.utcnow(),
+                        "is_paused": False
                     }
                 }
             )
             
-            # Broadcast game started
+            # Get all tickets for this room
+            tickets = await db.tickets.find({"room_id": room_id}).to_list(1000)
+            serialized_tickets = [serialize_doc(t) for t in tickets]
+            
+            # Broadcast game started with tickets
             await sio.emit('game_started', {
                 'room_id': room_id,
-                'started_at': str(datetime.utcnow())
+                'started_at': str(datetime.utcnow()),
+                'tickets': serialized_tickets
             }, room=room_id)
             
-            logger.info(f"Game started in room {room_id}")
+            logger.info(f"Game started in room {room_id} with {len(tickets)} tickets")
         
         except Exception as e:
             logger.error(f"Start game error: {e}")
+            await sio.emit('error', {'message': str(e)}, room=sid)
+    
+    @sio.event
+    async def pause_game(sid, data):
+        """Pause/Resume the game"""
+        try:
+            room_id = data.get('room_id')
+            user_id = active_connections.get(sid)
+            
+            # Get room
+            room = await db.rooms.find_one({"id": room_id})
+            if not room:
+                return
+            
+            # Check if user is host
+            if room['host_id'] != user_id:
+                await sio.emit('error', {'message': 'Only host can pause game'}, room=sid)
+                return
+            
+            # Toggle pause state
+            is_paused = not room.get('is_paused', False)
+            
+            # Update room status
+            await db.rooms.update_one(
+                {"id": room_id},
+                {"$set": {"is_paused": is_paused}}
+            )
+            
+            # Broadcast pause state
+            await sio.emit('game_paused', {
+                'room_id': room_id,
+                'is_paused': is_paused
+            }, room=room_id)
+            
+            logger.info(f"Game {'paused' if is_paused else 'resumed'} in room {room_id}")
+        
+        except Exception as e:
+            logger.error(f"Pause game error: {e}")
+            await sio.emit('error', {'message': str(e)}, room=sid)
+    
+    @sio.event
+    async def end_game(sid, data):
+        """End the game and calculate rankings"""
+        try:
+            room_id = data.get('room_id')
+            user_id = active_connections.get(sid)
+            
+            # Get room
+            room = await db.rooms.find_one({"id": room_id})
+            if not room:
+                return
+            
+            # Check if user is host
+            if room['host_id'] != user_id:
+                await sio.emit('error', {'message': 'Only host can end game'}, room=sid)
+                return
+            
+            # Get all winners
+            winners = await db.winners.find({"room_id": room_id}).to_list(1000)
+            
+            # Calculate rankings based on prize types and claim time
+            prize_order = {
+                'early_five': 1,
+                'top_line': 2,
+                'middle_line': 3,
+                'bottom_line': 4,
+                'four_corners': 5,
+                'full_house': 6
+            }
+            
+            # Sort winners by prize order and claim time
+            sorted_winners = sorted(winners, key=lambda w: (
+                prize_order.get(w['prize_type'], 999),
+                w['claimed_at']
+            ))
+            
+            # Add rank to winners
+            for idx, winner in enumerate(sorted_winners):
+                await db.winners.update_one(
+                    {"id": winner['id']},
+                    {"$set": {"rank": idx + 1}}
+                )
+            
+            # Update room status
+            await db.rooms.update_one(
+                {"id": room_id},
+                {
+                    "$set": {
+                        "status": "completed",
+                        "completed_at": datetime.utcnow()
+                    }
+                }
+            )
+            
+            # Serialize winners
+            serialized_winners = [serialize_doc(w) for w in sorted_winners]
+            
+            # Broadcast game ended with rankings
+            await sio.emit('game_ended', {
+                'room_id': room_id,
+                'winners': serialized_winners,
+                'completed_at': str(datetime.utcnow())
+            }, room=room_id)
+            
+            logger.info(f"Game ended in room {room_id}")
+        
+        except Exception as e:
+            logger.error(f"End game error: {e}")
+            await sio.emit('error', {'message': str(e)}, room=sid)

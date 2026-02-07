@@ -35,10 +35,18 @@ interface Room {
   host_id: string;
   called_numbers: number[];
   current_number: number | null;
+  is_paused: boolean;
   prizes: Array<{
     prize_type: string;
     amount: number;
   }>;
+}
+
+interface Winner {
+  user_name: string;
+  prize_type: string;
+  amount: number;
+  rank?: number;
 }
 
 export default function LiveGameScreen() {
@@ -50,7 +58,11 @@ export default function LiveGameScreen() {
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
   const [showTicketModal, setShowTicketModal] = useState(false);
   const [showClaimModal, setShowClaimModal] = useState(false);
+  const [showWinnersModal, setShowWinnersModal] = useState(false);
+  const [winners, setWinners] = useState<Winner[]>([]);
   const [autoCall, setAutoCall] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [gameEnded, setGameEnded] = useState(false);
   const autoCallInterval = useRef<number | null>(null);
 
   useEffect(() => {
@@ -66,10 +78,10 @@ export default function LiveGameScreen() {
   }, []);
 
   useEffect(() => {
-    if (room?.current_number) {
+    if (room?.current_number && soundEnabled) {
       Speech.speak(String(room.current_number), { rate: 0.9 });
     }
-  }, [room?.current_number]);
+  }, [room?.current_number, soundEnabled]);
 
   const loadGameData = async () => {
     try {
@@ -107,12 +119,69 @@ export default function LiveGameScreen() {
     socketService.on('number_called', handleNumberCalled);
     socketService.on('prize_claimed', handlePrizeClaimed);
     socketService.on('winner_announced', handleWinnerAnnounced);
+    socketService.on('game_started', handleGameStarted);
+    socketService.on('game_paused', handleGamePaused);
+    socketService.on('game_ended', handleGameEnded);
   };
 
   const cleanupSocketListeners = () => {
     socketService.off('number_called');
     socketService.off('prize_claimed');
     socketService.off('winner_announced');
+    socketService.off('game_started');
+    socketService.off('game_paused');
+    socketService.off('game_ended');
+  };
+
+  const handleGameStarted = (data: any) => {
+    console.log('Game started:', data);
+    // Load tickets if they were just generated
+    if (data.tickets) {
+      const myTickets = data.tickets.filter((t: any) => t.user_id === user?.id);
+      setTickets(myTickets);
+      if (myTickets.length > 0) {
+        setSelectedTicket(myTickets[0]);
+      }
+    }
+    Alert.alert('Game Started!', 'The game has begun. Good luck!');
+  };
+
+  const handleGamePaused = (data: any) => {
+    console.log('Game paused:', data);
+    setRoom((prev) => {
+      if (!prev) return prev;
+      return { ...prev, is_paused: data.is_paused };
+    });
+    
+    if (data.is_paused) {
+      // Stop auto-calling if active
+      if (autoCallInterval.current) {
+        clearInterval(autoCallInterval.current);
+        autoCallInterval.current = null;
+      }
+      setAutoCall(false);
+      Alert.alert('Game Paused', 'The game has been paused by the host');
+    } else {
+      Alert.alert('Game Resumed', 'The game has been resumed');
+    }
+  };
+
+  const handleGameEnded = (data: any) => {
+    console.log('Game ended:', data);
+    setGameEnded(true);
+    setWinners(data.winners || []);
+    setShowWinnersModal(true);
+    
+    // Stop auto-calling
+    if (autoCallInterval.current) {
+      clearInterval(autoCallInterval.current);
+      autoCallInterval.current = null;
+    }
+    setAutoCall(false);
+    
+    if (soundEnabled) {
+      Speech.speak('Game Over! All numbers have been called.', { rate: 0.9 });
+    }
   };
 
   const handleNumberCalled = (data: any) => {
@@ -128,6 +197,16 @@ export default function LiveGameScreen() {
 
     // Auto-mark on tickets
     autoMarkNumber(data.number);
+
+    // Check if game is complete
+    if (data.game_complete) {
+      setGameEnded(true);
+      if (autoCallInterval.current) {
+        clearInterval(autoCallInterval.current);
+        autoCallInterval.current = null;
+      }
+      setAutoCall(false);
+    }
   };
 
   const handlePrizeClaimed = (data: any) => {
@@ -160,10 +239,25 @@ export default function LiveGameScreen() {
 
   const handleCallNumber = () => {
     if (!room) return;
+    if (room.is_paused) {
+      Alert.alert('Game Paused', 'Cannot call numbers while game is paused');
+      return;
+    }
+    if (room.called_numbers.length >= 90) {
+      Alert.alert('Game Complete', 'All numbers have been called!');
+      return;
+    }
     socketService.callNumber(params.id);
   };
 
   const toggleAutoCall = () => {
+    if (!room) return;
+    
+    if (room.is_paused) {
+      Alert.alert('Game Paused', 'Cannot start auto-call while game is paused');
+      return;
+    }
+
     if (autoCall) {
       if (autoCallInterval.current) {
         clearInterval(autoCallInterval.current);
@@ -176,6 +270,35 @@ export default function LiveGameScreen() {
         handleCallNumber();
       }, 5000); // Every 5 seconds
       setAutoCall(true);
+    }
+  };
+
+  const togglePause = () => {
+    if (!room) return;
+    socketService.pauseGame(params.id);
+  };
+
+  const handleEndGame = () => {
+    Alert.alert(
+      'End Game',
+      'Are you sure you want to end the game? This will calculate final rankings.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'End Game',
+          style: 'destructive',
+          onPress: () => socketService.endGame(params.id),
+        },
+      ]
+    );
+  };
+
+  const toggleSound = () => {
+    setSoundEnabled(!soundEnabled);
+    if (!soundEnabled) {
+      Speech.speak('Sound enabled', { rate: 0.9 });
+    } else {
+      Speech.stop();
     }
   };
 
@@ -379,8 +502,15 @@ export default function LiveGameScreen() {
           </TouchableOpacity>
           <Text style={styles.headerTitle}>{room.name}</Text>
           <View style={styles.headerRight}>
+            <TouchableOpacity onPress={toggleSound} style={styles.iconButton}>
+              <MaterialCommunityIcons
+                name={soundEnabled ? 'volume-high' : 'volume-off'}
+                size={24}
+                color="#FFD700"
+              />
+            </TouchableOpacity>
             <Text style={styles.calledCount}>{room.called_numbers.length}/90</Text>
-            <TouchableOpacity onPress={() => setShowTicketModal(true)}>
+            <TouchableOpacity onPress={() => setShowTicketModal(true)} style={styles.iconButton}>
               <MaterialCommunityIcons name="ticket" size={24} color="#FFD700" />
             </TouchableOpacity>
           </View>
@@ -395,37 +525,71 @@ export default function LiveGameScreen() {
                 {room.current_number || '--'}
               </Text>
             </View>
+            {room.is_paused && (
+              <View style={styles.pausedBadge}>
+                <MaterialCommunityIcons name="pause" size={16} color="#FFF" />
+                <Text style={styles.pausedText}>PAUSED</Text>
+              </View>
+            )}
           </View>
 
           {/* Host Controls */}
           {isHost && (
-            <View style={styles.controls}>
-              <TouchableOpacity
-                style={styles.controlButton}
-                onPress={handleCallNumber}
-                disabled={autoCall}
-              >
-                <MaterialCommunityIcons name="hand-pointing-right" size={24} color="#FFF" />
-                <Text style={styles.controlButtonText}>Call Number</Text>
-              </TouchableOpacity>
+            <>
+              <View style={styles.controls}>
+                <TouchableOpacity
+                  style={[styles.controlButton, (autoCall || room.is_paused) && styles.controlButtonDisabled]}
+                  onPress={handleCallNumber}
+                  disabled={autoCall || room.is_paused}
+                >
+                  <MaterialCommunityIcons name="hand-pointing-right" size={24} color="#FFF" />
+                  <Text style={styles.controlButtonText}>Call Number</Text>
+                </TouchableOpacity>
 
-              <TouchableOpacity
-                style={[
-                  styles.controlButton,
-                  autoCall ? styles.stopButton : styles.autoButton,
-                ]}
-                onPress={toggleAutoCall}
-              >
-                <MaterialCommunityIcons
-                  name={autoCall ? 'stop' : 'play'}
-                  size={24}
-                  color="#FFF"
-                />
-                <Text style={styles.controlButtonText}>
-                  {autoCall ? 'Stop Auto' : 'Auto Mode'}
-                </Text>
-              </TouchableOpacity>
-            </View>
+                <TouchableOpacity
+                  style={[
+                    styles.controlButton,
+                    autoCall ? styles.stopButton : styles.autoButton,
+                    room.is_paused && styles.controlButtonDisabled,
+                  ]}
+                  onPress={toggleAutoCall}
+                  disabled={room.is_paused}
+                >
+                  <MaterialCommunityIcons
+                    name={autoCall ? 'stop' : 'play'}
+                    size={24}
+                    color="#FFF"
+                  />
+                  <Text style={styles.controlButtonText}>
+                    {autoCall ? 'Stop Auto' : 'Auto Mode'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.hostControls}>
+                <TouchableOpacity
+                  style={[styles.hostButton, styles.pauseButton]}
+                  onPress={togglePause}
+                >
+                  <MaterialCommunityIcons
+                    name={room.is_paused ? 'play' : 'pause'}
+                    size={20}
+                    color="#FFF"
+                  />
+                  <Text style={styles.hostButtonText}>
+                    {room.is_paused ? 'Resume' : 'Pause'}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.hostButton, styles.endButton]}
+                  onPress={handleEndGame}
+                >
+                  <MaterialCommunityIcons name="flag-checkered" size={20} color="#FFF" />
+                  <Text style={styles.hostButtonText}>End Game</Text>
+                </TouchableOpacity>
+              </View>
+            </>
           )}
 
           {/* Number Board */}
@@ -524,6 +688,57 @@ export default function LiveGameScreen() {
             </View>
           </View>
         </Modal>
+
+        {/* Winners Modal */}
+        <Modal
+          visible={showWinnersModal}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setShowWinnersModal(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.winnersHeader}>
+                <MaterialCommunityIcons name="trophy" size={48} color="#FFD700" />
+                <Text style={styles.modalTitle}>🎉 Game Over! 🎉</Text>
+                <Text style={styles.modalSubtitle}>Final Rankings</Text>
+              </View>
+
+              <ScrollView style={styles.winnersList}>
+                {winners.length > 0 ? (
+                  winners.map((winner, index) => (
+                    <View key={index} style={styles.winnerCard}>
+                      <View style={styles.winnerRank}>
+                        <Text style={styles.winnerRankText}>#{index + 1}</Text>
+                      </View>
+                      <View style={styles.winnerInfo}>
+                        <Text style={styles.winnerName}>{winner.user_name}</Text>
+                        <Text style={styles.winnerPrize}>
+                          {winner.prize_type.replace('_', ' ').toUpperCase()}
+                        </Text>
+                      </View>
+                      <Text style={styles.winnerAmount}>₹{winner.amount}</Text>
+                    </View>
+                  ))
+                ) : (
+                  <View style={styles.noWinnersContainer}>
+                    <Text style={styles.noWinnersText}>No winners yet</Text>
+                  </View>
+                )}
+              </ScrollView>
+
+              <TouchableOpacity
+                style={styles.modalCloseButton}
+                onPress={() => {
+                  setShowWinnersModal(false);
+                  router.back();
+                }}
+              >
+                <Text style={styles.modalCloseButtonText}>Close & Exit</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     </LinearGradient>
   );
@@ -558,6 +773,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
+  },
+  iconButton: {
+    padding: 4,
   },
   calledCount: {
     fontSize: 14,
@@ -597,6 +815,21 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#1a5f1a',
   },
+  pausedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#FF6B35',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+    marginTop: 12,
+  },
+  pausedText: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    color: '#FFF',
+  },
   controls: {
     flexDirection: 'row',
     gap: 12,
@@ -612,6 +845,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#FF6B35',
     gap: 8,
   },
+  controlButtonDisabled: {
+    opacity: 0.5,
+  },
   autoButton: {
     backgroundColor: '#4ECDC4',
   },
@@ -619,6 +855,31 @@ const styles = StyleSheet.create({
     backgroundColor: '#FF4444',
   },
   controlButtonText: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#FFF',
+  },
+  hostControls: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 16,
+  },
+  hostButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 12,
+    borderRadius: 8,
+    gap: 8,
+  },
+  pauseButton: {
+    backgroundColor: '#FFA500',
+  },
+  endButton: {
+    backgroundColor: '#FF4444',
+  },
+  hostButtonText: {
     fontSize: 14,
     fontWeight: 'bold',
     color: '#FFF',
@@ -791,6 +1052,63 @@ const styles = StyleSheet.create({
   },
   ticketsList: {
     paddingBottom: 16,
+  },
+  winnersHeader: {
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  winnersList: {
+    maxHeight: 400,
+  },
+  winnerCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
+    borderRadius: 12,
+    backgroundColor: '#F5F5F5',
+    marginBottom: 12,
+    borderWidth: 2,
+    borderColor: '#FFD700',
+  },
+  winnerRank: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#FFD700',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  winnerRankText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#1a5f1a',
+  },
+  winnerInfo: {
+    flex: 1,
+  },
+  winnerName: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#1a5f1a',
+  },
+  winnerPrize: {
+    fontSize: 12,
+    color: '#666',
+    marginTop: 2,
+  },
+  winnerAmount: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#4ECDC4',
+  },
+  noWinnersContainer: {
+    padding: 40,
+    alignItems: 'center',
+  },
+  noWinnersText: {
+    fontSize: 16,
+    color: '#999',
   },
   modalCloseButton: {
     backgroundColor: '#1a5f1a',

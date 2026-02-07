@@ -125,6 +125,7 @@ class Room(BaseModel):
     prize_pool: float = 0.0
     called_numbers: List[int] = []
     current_number: Optional[int] = None
+    is_paused: bool = False
     winners: List[Dict[str, Any]] = []
     admin_selected_ticket: Optional[str] = None  # ticket_id for host's winner pick
     created_at: datetime = Field(default_factory=datetime.utcnow)
