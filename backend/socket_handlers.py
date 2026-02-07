@@ -267,7 +267,19 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
             for ticket in tickets:
                 # Check if number exists in ticket grid
                 number_found = False
-                for row in ticket.get('grid', []):
+                grid = ticket.get('grid', [])
+                
+                # Ensure grid is a list
+                if not isinstance(grid, list):
+                    logger.warning(f"Invalid grid format for ticket {ticket.get('id')}")
+                    continue
+                
+                for row in grid:
+                    # Ensure row is a list
+                    if not isinstance(row, list):
+                        continue
+                    
+                    # Check if number is in this row
                     if number in row:
                         number_found = True
                         break
@@ -275,6 +287,11 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
                 if number_found:
                     # Add number to marked_numbers if not already there
                     marked = ticket.get('marked_numbers', [])
+                    
+                    # Ensure marked is a list
+                    if not isinstance(marked, list):
+                        marked = []
+                    
                     if number not in marked:
                         marked.append(number)
                         
