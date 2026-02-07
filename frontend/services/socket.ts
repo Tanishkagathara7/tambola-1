@@ -14,6 +14,25 @@ class SocketService {
   private socket: Socket | null = null;
   private userId: string | null = null;
   private currentRoom: string | null = null;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+
+  constructor() {
+    // Auto-connect on initialization
+    this.initializeConnection();
+  }
+
+  /**
+   * Initialize connection with retry logic
+   */
+  private async initializeConnection() {
+    try {
+      await this.connect();
+    } catch (error) {
+      console.error('Initial socket connection failed:', error);
+      // Will retry via reconnection logic
+    }
+  }
 
   /**
    * Connect to Socket.IO server
@@ -34,7 +53,9 @@ class SocketService {
     this.socket = io(SOCKET_URL, {
       transports: ['websocket'],
       reconnection: true,
-      reconnectionAttempts: Infinity,
+      reconnectionAttempts: this.maxReconnectAttempts,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
       timeout: 20000,
     });
 

@@ -39,6 +39,15 @@ export default function LobbyScreen() {
 
   useEffect(() => {
     loadRooms();
+
+    // Ensure socket is connected for real-time updates
+    import('../services/socket').then(({ socketService }) => {
+      if (!socketService.isConnected()) {
+        socketService.connect().catch(err => {
+          console.error('Failed to connect socket:', err);
+        });
+      }
+    });
   }, [filter]);
 
   const loadRooms = async () => {

@@ -68,24 +68,35 @@ export default function RoomScreen() {
       const data = await roomAPI.getRoom(params.id);
       setRoom(data);
 
-      // If current user is not in players (e.g. room creator), join via API
+      // Check if current user is in the room's players list
       const isInRoom = data.players?.some((p: { id: string }) => p.id === user?.id);
+
+      // Only attempt to join if:
+      // 1. User is authenticated
+      // 2. User is NOT already in the room
+      // 3. We haven't already tried to join (prevent double calls)
       if (user && !isInRoom && !joinCalledRef.current) {
         joinCalledRef.current = true;
         try {
-          await roomAPI.joinRoom(
-            params.id,
-            data.room_type === 'private' ? undefined : undefined
-          );
+          await roomAPI.joinRoom(params.id);
+          // Reload room data to get updated players list
           const updated = await roomAPI.getRoom(params.id);
           setRoom(updated);
         } catch (joinErr: any) {
-          if (joinErr?.message?.includes('Already in room')) {
+          // If already in room, that's okay - just continue
+          const errorMsg = joinErr?.message || String(joinErr);
+          if (errorMsg.includes('Already in room')) {
+            console.log('User already in room, continuing...');
+            joinCalledRef.current = false;
+          } else {
+            // For other errors, log but don't block
+            console.error('Error joining room:', joinErr);
             joinCalledRef.current = false;
           }
         }
       }
 
+      // Join socket room if connected
       if (socketService.isConnected()) {
         socketService.joinRoom(params.id);
       }
