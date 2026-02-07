@@ -15,21 +15,6 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export default function SettingsScreen() {
   const router = useRouter();
-  const [secretTapCount, setSecretTapCount] = useState(0);
-
-  const handleSecretAccess = () => {
-    const newCount = secretTapCount + 1;
-    setSecretTapCount(newCount);
-
-    if (newCount >= 7) {
-      // Unlock admin panel after 7 taps
-      router.push('/admin');
-      setSecretTapCount(0);
-    }
-
-    // Reset counter after 2 seconds of inactivity
-    setTimeout(() => setSecretTapCount(0), 2000);
-  };
 
   const handleClearData = () => {
     Alert.alert(
@@ -130,15 +115,6 @@ export default function SettingsScreen() {
             </View>
           </View>
 
-          {/* Secret Admin Access - Tap version text 7 times */}
-          <TouchableOpacity
-            style={styles.secretButton}
-            onPress={handleSecretAccess}
-            activeOpacity={1}
-          >
-            <Text style={styles.appVersion}>Housie Book v1.0</Text>
-          </TouchableOpacity>
-
           {/* Footer */}
           <Text style={styles.footer}>Made for Family Entertainment</Text>
         </ScrollView>
@@ -218,18 +194,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: 'rgba(255, 255, 255, 0.6)',
     marginTop: 2,
-  },
-  secretButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    padding: 12,
-    marginTop: 32,
-  },
-  secretText: {
-    fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.2)',
   },
   footer: {
     fontSize: 12,

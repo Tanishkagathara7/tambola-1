@@ -9,6 +9,7 @@ export default function HomeScreen() {
   const router = useRouter();
   const { isAuthenticated, isLoading } = useAuth();
   const [showOptions, setShowOptions] = useState(false);
+  const [secretTapCount, setSecretTapCount] = useState(0);
 
   useEffect(() => {
     if (!isLoading) {
@@ -21,6 +22,20 @@ export default function HomeScreen() {
       }
     }
   }, [isLoading, isAuthenticated]);
+
+  const handleSecretAdminAccess = () => {
+    const newCount = secretTapCount + 1;
+    setSecretTapCount(newCount);
+
+    if (newCount >= 7) {
+      // Unlock admin panel after 7 taps
+      router.push('/admin');
+      setSecretTapCount(0);
+    }
+
+    // Reset counter after 2 seconds of inactivity
+    setTimeout(() => setSecretTapCount(0), 2000);
+  };
 
   if (isLoading || !showOptions) {
     return (
@@ -105,7 +120,9 @@ export default function HomeScreen() {
         )}
 
         {/* Footer */}
-        <Text style={styles.footer}>v2.0 - Multiplayer Edition</Text>
+        <TouchableOpacity onPress={handleSecretAdminAccess} activeOpacity={1}>
+          <Text style={styles.footer}>v2.0 - Multiplayer Edition</Text>
+        </TouchableOpacity>
       </View>
     </LinearGradient>
   );
