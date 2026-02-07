@@ -885,6 +885,32 @@ async def get_winners(
     return [Winner(**winner) for winner in winners]
 
 
+# ============= TICKET API =============
+@api_router.get("/tickets/my-tickets/{room_id}")
+async def get_my_tickets(
+    room_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get user's tickets for a specific room"""
+    try:
+        tickets = await db.tickets.find({
+            "room_id": room_id,
+            "user_id": current_user["id"]
+        }).to_list(100)
+        
+        # Serialize tickets to remove ObjectId
+        serialized_tickets = [serialize_doc(t) for t in tickets]
+        
+        logger.info(f"Found {len(serialized_tickets)} tickets for user {current_user['id']} in room {room_id}")
+        
+        # Return empty array if no tickets (not an error)
+        return serialized_tickets
+    except Exception as e:
+        logger.error(f"Error fetching tickets: {e}")
+        # Return empty array instead of error
+        return []
+
+
 # Include router
 app.include_router(api_router)
 

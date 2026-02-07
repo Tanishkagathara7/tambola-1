@@ -91,6 +91,14 @@ export default function LiveGameScreen() {
       // Load user's tickets
       try {
         const userTickets = await ticketAPI.getMyTickets(params.id);
+
+        // ENSURE userTickets is an array
+        if (!userTickets || !Array.isArray(userTickets)) {
+          console.log('No tickets returned or invalid format, setting empty array');
+          setTickets([]);
+          return;
+        }
+
         // ENSURE marked_numbers is always initialized
         const ticketsWithMarked = userTickets.map((t: any) => ({
           ...t,
