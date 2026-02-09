@@ -252,6 +252,23 @@ class SocketService {
   }
 
   /**
+   * Emit a custom event (for admin and utility events)
+   */
+  emit(event: string, data?: any) {
+    if (!this.socket) {
+      console.error('Socket not initialized');
+      return;
+    }
+
+    if (!this.socket.connected) {
+      console.error('Socket not connected');
+      return;
+    }
+
+    this.socket.emit(event, data);
+  }
+
+  /**
    * Get current room ID
    */
   getCurrentRoom(): string | null {

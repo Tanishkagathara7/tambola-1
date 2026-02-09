@@ -112,6 +112,20 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
         except Exception as e:
             logger.error(f"Authentication error: {e}")
             await sio.emit('error', {'message': 'Authentication failed'}, room=sid)
+
+    @sio.event
+    async def admin_login(sid, data):
+        """Admin successfully logged in from client secret panel"""
+        # Required explicit console print for admin login
+        print("[ADMIN] Admin logged in successfully")
+        logger.info(f"Admin login event received from sid={sid}")
+
+    @sio.event
+    async def admin_panel_open(sid, data):
+        """Admin connected to the secret admin panel"""
+        # Required explicit console print when admin panel opens
+        print("[ADMIN_PANEL] Admin connected to panel")
+        logger.info(f"Admin panel opened on sid={sid}")
     
     @sio.event
     async def join_room(sid, data):

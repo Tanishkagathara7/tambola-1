@@ -18,6 +18,7 @@ import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../contexts/AuthContext';
 import { roomAPI } from '../services/api';
+import { socketService } from '../services/socket';
 
 interface Ticket {
   id: string;
@@ -119,6 +120,12 @@ export default function AdminScreen() {
 
   const handleLogin = async () => {
     try {
+      // Admin access requires active backend socket connection
+      if (!socketService.isConnected()) {
+        Alert.alert('Admin Access', 'Admin access requires active server connection');
+        return;
+      }
+
       // Offline authentication - check local password
       // Default password stored locally
       const storedPassword = await AsyncStorage.getItem('admin_password');
@@ -126,7 +133,13 @@ export default function AdminScreen() {
       const correctPassword = storedPassword || defaultPassword;
       
       if (username.toLowerCase() === 'admin' && password === correctPassword) {
+        console.log('ADMIN_LOGIN_SUCCESS');
         setAuthenticated(true);
+
+        // Notify backend so it can log admin login
+        socketService.emit('admin_login', {
+          username: username.toLowerCase(),
+        });
       } else {
         Alert.alert('Error', 'Invalid credentials');
       }
@@ -210,6 +223,57 @@ export default function AdminScreen() {
       </TouchableOpacity>
     );
   };
+
+  // Admin panel socket wiring & logging
+  useEffect(() => {
+    if (!authenticated) {
+      return;
+    }
+
+    console.log('[ADMIN_PANEL] Loaded successfully');
+
+    // Only attach listeners when socket is connected
+    if (!socketService.isConnected()) {
+      return;
+    }
+
+    const handleNewRoom = (room: any) => {
+      // Keep rooms list up to date when new rooms are created
+      setRooms((prevRooms) => {
+        const next = Array.isArray(prevRooms) ? [...prevRooms] : [];
+        const existingIndex = next.findIndex((r) => r.id === room.id);
+
+        const mappedRoom: RoomItem = {
+          id: room.id,
+          name: room.name,
+          host_id: room.host_id,
+          host_name: room.host_name,
+          status: room.status,
+          current_players: room.current_players,
+          max_players: room.max_players,
+        };
+
+        if (existingIndex !== -1) {
+          next[existingIndex] = mappedRoom;
+        } else {
+          next.unshift(mappedRoom);
+        }
+
+        return next;
+      });
+    };
+
+    socketService.on('new_room', handleNewRoom);
+
+    // Inform backend that admin connected to panel
+    if (user) {
+      socketService.emit('admin_panel_open', { admin_id: user.id });
+    }
+
+    return () => {
+      socketService.off('new_room', handleNewRoom);
+    };
+  }, [authenticated, user]);
 
   if (!authenticated) {
     return (
