@@ -9,6 +9,7 @@ motor==3.3.1
 # New dependencies for multiplayer
 python-jose[cryptography]>=3.3.0  # JWT tokens
 passlib[bcrypt]>=1.7.4  # Password hashing
+bcrypt==4.0.1  # Pin bcrypt to avoid 72-byte limit error in passlib checks
 python-multipart>=0.0.9  # File uploads
 websockets>=12.0  # WebSocket support
 redis>=5.0.0  # Session management & caching
