@@ -688,20 +688,6 @@ async def buy_tickets(
     )
 
 
-@api_router.get("/tickets/my-tickets/{room_id}", response_model=List[Ticket])
-async def get_my_tickets(
-    room_id: str,
-    current_user: dict = Depends(get_current_user)
-):
-    """Get user's tickets for a specific room"""
-    tickets = await db.tickets.find({
-        "room_id": room_id,
-        "user_id": current_user["id"]
-    }).to_list(100)
-    
-    return [Ticket(**ticket) for ticket in tickets]
-
-
 # ============= WALLET ROUTES =============
 @api_router.get("/wallet/balance")
 async def get_wallet_balance(current_user: dict = Depends(get_current_user)):
