@@ -1047,15 +1047,40 @@ async def get_my_tickets(
             if "user_name" not in ticket or not ticket.get("user_name"):
                 ticket["user_name"] = current_user.get("name", "")
             
+            # Ensure grid is a proper 2D array
+            if "grid" in ticket:
+                grid = ticket["grid"]
+                # If grid is a string, try to parse it
+                if isinstance(grid, str):
+                    import json
+                    try:
+                        grid = json.loads(grid)
+                        ticket["grid"] = grid
+                    except:
+                        logger.error(f"Failed to parse grid for ticket {ticket.get('id')}")
+                        ticket["grid"] = [[None] * 9 for _ in range(3)]  # Default empty grid
+                # Ensure it's a list
+                elif not isinstance(grid, list):
+                    logger.error(f"Grid is not a list for ticket {ticket.get('id')}: {type(grid)}")
+                    ticket["grid"] = [[None] * 9 for _ in range(3)]  # Default empty grid
+            else:
+                # No grid field, create empty one
+                ticket["grid"] = [[None] * 9 for _ in range(3)]
+            
             # Add numbers field if missing (for old tickets)
             if "numbers" not in ticket and "grid" in ticket:
                 # Extract numbers from grid
                 numbers = []
                 for row in ticket["grid"]:
-                    for num in row:
-                        if num is not None:
-                            numbers.append(num)
+                    if isinstance(row, list):
+                        for num in row:
+                            if num is not None and isinstance(num, (int, float)):
+                                numbers.append(int(num))
                 ticket["numbers"] = sorted(numbers)
+            
+            # Ensure marked_numbers exists
+            if "marked_numbers" not in ticket:
+                ticket["marked_numbers"] = []
             
             # Serialize to convert datetime to ISO string
             serialized = serialize_doc(ticket)
