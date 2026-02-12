@@ -598,6 +598,90 @@ async def join_room(
     return MessageResponse(message="Joined room successfully", data={"room_id": room_id})
 
 
+@api_router.delete("/rooms/{room_id}", response_model=MessageResponse)
+async def delete_room(
+    room_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Delete a room (host only)"""
+    room = await db.rooms.find_one({"id": room_id})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    
+    # Check if user is host
+    if room["host_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only host can delete the room")
+    
+    # Check if game is active
+    if room["status"] == RoomStatus.ACTIVE:
+        raise HTTPException(
+            status_code=400, 
+            detail="Cannot delete room while game is active. Please end the game first."
+        )
+    
+    # Delete all tickets associated with this room
+    tickets_result = await db.tickets.delete_many({"room_id": room_id})
+    
+    # Delete all winners associated with this room
+    winners_result = await db.winners.delete_many({"room_id": room_id})
+    
+    # Refund players who bought tickets (if game hasn't started)
+    if room["status"] == RoomStatus.WAITING:
+        # Get all tickets that were purchased
+        ticket_price = room.get("ticket_price", 0)
+        
+        # Group tickets by user to calculate refunds
+        tickets = await db.tickets.find({"room_id": room_id}).to_list(1000)
+        user_ticket_counts = {}
+        for ticket in tickets:
+            user_id = ticket.get("user_id")
+            if user_id:
+                user_ticket_counts[user_id] = user_ticket_counts.get(user_id, 0) + 1
+        
+        # Refund each user
+        for user_id, ticket_count in user_ticket_counts.items():
+            refund_amount = ticket_price * ticket_count
+            
+            # Credit back to user
+            await db.users.update_one(
+                {"id": user_id},
+                {"$inc": {"points_balance": refund_amount}}
+            )
+            
+            # Create refund transaction
+            transaction = Transaction(
+                user_id=user_id,
+                amount=refund_amount,
+                type=TransactionType.CREDIT,
+                description=f"Refund for room deletion: {room['name']}",
+                balance_after=0,  # Will be updated by actual balance
+                room_id=room_id
+            )
+            await db.transactions.insert_one(transaction.dict())
+            
+            logger.info(f"Refunded {refund_amount} points to user {user_id} for room {room_id}")
+    
+    # Delete the room
+    await db.rooms.delete_one({"id": room_id})
+    
+    # Broadcast room deleted via socket
+    await sio.emit('room_deleted', {
+        "room_id": room_id,
+        "message": "Room has been deleted by the host"
+    }, room=room_id)
+    
+    logger.info(f"Room {room_id} deleted by host {current_user['id']}")
+    
+    return MessageResponse(
+        message="Room deleted successfully",
+        data={
+            "room_id": room_id,
+            "tickets_deleted": tickets_result.deleted_count,
+            "winners_deleted": winners_result.deleted_count
+        }
+    )
+
+
 # ============= TICKET ROUTES =============
 @api_router.post("/tickets/buy", response_model=MessageResponse)
 async def buy_tickets(
