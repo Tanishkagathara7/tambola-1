@@ -75,6 +75,41 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# ============= ROOT & HEALTH CHECK ROUTES =============
+@app.get("/")
+async def root():
+    """Root endpoint - Health check"""
+    return {
+        "status": "ok",
+        "message": "Tambola Multiplayer API is running",
+        "version": "2.0.0",
+        "endpoints": {
+            "api": "/api",
+            "docs": "/docs",
+            "health": "/health"
+        }
+    }
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring"""
+    try:
+        # Test MongoDB connection
+        await db.command('ping')
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "database": "disconnected",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+
 # ============= SERIALIZATION HELPER =============
 from bson import ObjectId
 from typing import Any
