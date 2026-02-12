@@ -12,7 +12,7 @@ interface User {
   email: string;
   mobile: string;
   profile_pic?: string;
-  wallet_balance: number;
+  points_balance: number;
   total_games: number;
   total_wins: number;
   total_winnings: number;
@@ -27,7 +27,7 @@ interface AuthContextType {
   signup: (name: string, email: string, mobile: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshProfile: () => Promise<void>;
-  updateWalletBalance: (newBalance: number) => void;
+  updatePointsBalance: (newBalance: number) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -120,9 +120,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
-  const updateWalletBalance = (newBalance: number) => {
+  const updatePointsBalance = (newBalance: number) => {
     if (user) {
-      const updatedUser = { ...user, wallet_balance: newBalance };
+      const updatedUser = { ...user, points_balance: newBalance };
       setUser(updatedUser);
       AsyncStorage.setItem('user_data', JSON.stringify(updatedUser));
     }
@@ -138,7 +138,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         signup,
         logout,
         refreshProfile,
-        updateWalletBalance,
+        updatePointsBalance,
       }}
     >
       {children}

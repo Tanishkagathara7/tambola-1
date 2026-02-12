@@ -268,12 +268,12 @@ async def signup(user_data: UserCreate):
     
     await db.users.insert_one(user.dict())
     
-    # Create wallet with ₹500 initial balance
+    # Create wallet with 50 points initial balance
     wallet_id = str(uuid.uuid4())
     wallet = {
         "id": wallet_id,
         "user_id": user.id,
-        "balance": 500.0,  # ₹500 initial balance
+        "balance": 50.0,  # 50 points initial balance
         "created_at": datetime.utcnow()
     }
     await db.wallets.insert_one(wallet)
@@ -284,12 +284,17 @@ async def signup(user_data: UserCreate):
         "id": transaction_id,
         "user_id": user.id,
         "type": "credit",
-        "amount": 500.0,
-        "description": "Welcome bonus - Initial wallet balance",
+        "amount": 50.0,
+        "description": "Welcome bonus - Initial 50 Points",
         "created_at": datetime.utcnow()
     })
     
-    logger.info(f"Created new user {user.id} with ₹500 welcome bonus")
+    await db.users.update_one(
+        {"id": user.id},
+        {"$set": {"points_balance": 50.0}}
+    )
+    
+    logger.info(f"Created new user {user.id} with 50 points welcome bonus")
     
     # Create token
     token = create_user_token(user.id, user.email)
@@ -301,7 +306,7 @@ async def signup(user_data: UserCreate):
         email=user.email,
         mobile=user.mobile,
         profile_pic=user.profile_pic,
-        wallet_balance=user.wallet_balance,
+        points_balance=user.points_balance,
         total_games=user.total_games,
         total_wins=user.total_wins,
         total_winnings=user.total_winnings,
@@ -344,7 +349,7 @@ async def login(credentials: UserLogin):
         email=user["email"],
         mobile=user["mobile"],
         profile_pic=user.get("profile_pic"),
-        wallet_balance=user.get("wallet_balance", 0.0),
+        points_balance=user.get("points_balance", 0.0),
         total_games=user.get("total_games", 0),
         total_wins=user.get("total_wins", 0),
         total_winnings=user.get("total_winnings", 0.0),
@@ -363,7 +368,7 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
         email=current_user["email"],
         mobile=current_user["mobile"],
         profile_pic=current_user.get("profile_pic"),
-        wallet_balance=current_user.get("wallet_balance", 0.0),
+        points_balance=current_user.get("points_balance", 0.0),
         total_games=current_user.get("total_games", 0),
         total_wins=current_user.get("total_wins", 0),
         total_winnings=current_user.get("total_winnings", 0.0),
@@ -573,8 +578,8 @@ async def buy_tickets(
     total_cost = room["ticket_price"] * purchase.quantity
     
     # Check wallet balance
-    if current_user["wallet_balance"] < total_cost:
-        raise HTTPException(status_code=400, detail="Insufficient wallet balance")
+    if current_user["points_balance"] < total_cost:
+        raise HTTPException(status_code=400, detail="Insufficient points balance")
     
     # Generate tickets
     tickets = []
@@ -598,10 +603,10 @@ async def buy_tickets(
     await db.tickets.insert_many(tickets)
     
     # Deduct from wallet
-    new_balance = current_user["wallet_balance"] - total_cost
+    new_balance = current_user["points_balance"] - total_cost
     await db.users.update_one(
         {"id": current_user["id"]},
-        {"$set": {"wallet_balance": new_balance}}
+        {"$set": {"points_balance": new_balance}}
     )
     
     # Create transaction
@@ -615,16 +620,27 @@ async def buy_tickets(
     )
     await db.transactions.insert_one(transaction.dict())
     
-    # Update room
+    # Update room with dynamic prize pool
+    # Update tickets sold count first
     await db.rooms.update_one(
         {"id": purchase.room_id},
-        {
-            "$inc": {
-                "tickets_sold": purchase.quantity,
-                "prize_pool": total_cost * 0.8  # 80% goes to prize pool
-            }
-        }
+        {"$inc": {"tickets_sold": purchase.quantity}}
     )
+
+    # Recalculate prize pool based on TOTAL tickets sold * ticket price
+    updated_room = await db.rooms.find_one({"id": purchase.room_id})
+    if updated_room:
+        current_tickets_sold = updated_room.get("tickets_sold", 0)
+        ticket_price = updated_room.get("ticket_price", 0)
+        
+        # Prize pool = Total Tickets Sold * Ticket Price
+        # (Winning distribution calculated at game start or end)
+        new_prize_pool = current_tickets_sold * ticket_price
+        
+        await db.rooms.update_one(
+            {"id": purchase.room_id},
+            {"$set": {"prize_pool": new_prize_pool}}
+        )
     
     logger.info(f"User {current_user['id']} bought {purchase.quantity} tickets for room {purchase.room_id}")
     
@@ -651,8 +667,8 @@ async def get_my_tickets(
 # ============= WALLET ROUTES =============
 @api_router.get("/wallet/balance")
 async def get_wallet_balance(current_user: dict = Depends(get_current_user)):
-    """Get wallet balance"""
-    return {"balance": current_user.get("wallet_balance", 0.0)}
+    """Get points balance"""
+    return {"balance": current_user.get("points_balance", 0.0)}
 
 
 @api_router.post("/wallet/add-money", response_model=MessageResponse)
@@ -664,11 +680,11 @@ async def add_money(
     # TODO: Integrate with Razorpay or other payment gateway
     # For now, just add money directly (for testing)
     
-    new_balance = current_user.get("wallet_balance", 0.0) + wallet_data.amount
+    new_balance = current_user.get("points_balance", 0.0) + wallet_data.amount
     
     await db.users.update_one(
         {"id": current_user["id"]},
-        {"$set": {"wallet_balance": new_balance}}
+        {"$set": {"points_balance": new_balance}}
     )
     
     # Create transaction
@@ -700,6 +716,67 @@ async def get_transactions(
     }).sort("created_at", -1).limit(limit).to_list(limit)
     
     return [Transaction(**txn) for txn in transactions]
+
+
+# ============= ADS ROUTES =============
+@api_router.post("/ads/rewarded", response_model=MessageResponse)
+async def ads_rewarded(current_user: dict = Depends(get_current_user)):
+    """Reward user for watching an ad"""
+    reward_points = 10.0
+    
+    new_balance = current_user.get("points_balance", 0.0) + reward_points
+    
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {"$set": {"points_balance": new_balance}}
+    )
+    
+    # Create transaction
+    transaction = Transaction(
+        user_id=current_user["id"],
+        amount=reward_points,
+        type=TransactionType.CREDIT,
+        description="Ad Reward - Watched Video Ad",
+        balance_after=new_balance
+    )
+    await db.transactions.insert_one(transaction.dict())
+    
+    logger.info(f"User {current_user['id']} rewarded 10 points for ad")
+    
+    return MessageResponse(
+        message="Ad reward credited successfully",
+        data={"new_balance": new_balance, "reward": reward_points}
+    )
+
+
+# ============= ROOM CLEANUP & COMPLETED GAMES =============
+@api_router.get("/rooms/cleanup", response_model=MessageResponse)
+async def cleanup_rooms():
+    """Cleanup old empty rooms (auto-called or manual)"""
+    # Find rooms created > 1 hour ago AND (no players OR status is cancelled)
+    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+    
+    result = await db.rooms.delete_many({
+        "$or": [
+            {"created_at": {"$lt": one_hour_ago}, "current_players": 0},
+            {"status": RoomStatus.CANCELLED, "created_at": {"$lt": one_hour_ago}}
+        ]
+    })
+    
+    return MessageResponse(
+        message=f"Cleanup completed. Removed {result.deleted_count} rooms."
+    )
+
+@api_router.get("/rooms/completed/history", response_model=List[Room])
+async def get_completed_rooms(limit: int = 10):
+    """Get recently completed rooms with winners"""
+    rooms = await db.rooms.find({
+        "status": RoomStatus.COMPLETED
+    }).sort("completed_at", -1).limit(limit).to_list(limit)
+    
+    # Serialize to remove ObjectId
+    serialized_rooms = [serialize_doc(room) for room in rooms]
+    return [Room(**room) for room in serialized_rooms]
 
 
 # ============= GAME CONTROL ROUTES =============

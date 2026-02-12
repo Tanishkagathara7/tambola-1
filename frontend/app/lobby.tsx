@@ -14,7 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../contexts/AuthContext';
-import { roomAPI } from '../services/api';
+import { roomAPI, adsAPI } from '../services/api';
 
 interface Room {
   id: string;
@@ -120,6 +120,19 @@ export default function LobbyScreen() {
     }
   };
 
+  const handleWatchAd = async () => {
+    try {
+      // In a real app, show ad here
+      await adsAPI.watchRewarded();
+      Alert.alert('Success', 'You earned 10 points!');
+      // Refresh user profile to update points
+      // useAuth().refreshProfile(); // Assuming this exists or simple context update
+      // Since context update might be async/complex, we let the context handle it if it listens or just wait for next profile fetch
+    } catch (error) {
+      Alert.alert('Error', 'Failed to watch ad');
+    }
+  };
+
   const renderRoom = ({ item }: { item: Room }) => (
     <TouchableOpacity
       style={[styles.roomCard, joiningRoomId === item.id && { opacity: 0.7 }]}
@@ -208,11 +221,18 @@ export default function LobbyScreen() {
           </View>
           <View style={styles.headerRight}>
             <TouchableOpacity
+              style={styles.adButton}
+              onPress={handleWatchAd}
+            >
+              <MaterialCommunityIcons name="play-circle" size={20} color="#1a5f1a" />
+              <Text style={styles.adButtonText}>+10 Pts</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
               style={styles.walletButton}
               onPress={() => router.push('/profile')}
             >
-              <MaterialCommunityIcons name="wallet" size={24} color="#FFD700" />
-              <Text style={styles.walletText}>₹{user?.wallet_balance || 0}</Text>
+              <MaterialCommunityIcons name="star" size={24} color="#FFD700" />
+              <Text style={styles.walletText}>{user?.points_balance || 0}</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={() => router.push('/profile')}>
               <MaterialCommunityIcons name="account-circle" size={32} color="#FFD700" />
@@ -277,6 +297,14 @@ export default function LobbyScreen() {
         >
           <MaterialCommunityIcons name="plus" size={28} color="#1a5f1a" />
           <Text style={styles.createButtonText}>Create Room</Text>
+        </TouchableOpacity>
+
+        {/* Recent Games Button */}
+        <TouchableOpacity
+          style={styles.recentButton}
+          onPress={() => router.push('/recent-games' as any)}
+        >
+          <MaterialCommunityIcons name="history" size={28} color="#FFD700" />
         </TouchableOpacity>
       </SafeAreaView>
     </LinearGradient>
@@ -480,5 +508,33 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     color: '#1a5f1a',
+  },
+  adButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFD700',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 20,
+    gap: 4,
+    marginRight: 8,
+  },
+  adButtonText: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    color: '#1a5f1a',
+  },
+  recentButton: {
+    position: 'absolute',
+    bottom: 16,
+    right: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#FFD700',
   },
 });

@@ -23,9 +23,18 @@ import { useGameState } from '../contexts/GameStateContext';
 import { generateTicketsForPlayers, Ticket } from '../utils/ticketGenerator';
 import { checkPrizeWin, checkCustomPattern } from '../utils/prizeValidator';
 import { PrizeClaim, SelectedPrize } from '../types/claim-types';
+import { BannerAd, BannerAdSize, TestIds, InterstitialAd, AdEventType } from 'react-native-google-mobile-ads';
 
 const { width } = Dimensions.get('window');
 const AUTO_SPEED_SECONDS = 5;
+
+// Ad Unit IDs
+const BANNER_ID = __DEV__ ? TestIds.BANNER : 'ca-app-pub-1819958924466866/8783242378';
+const INTERSTITIAL_ID = __DEV__ ? TestIds.INTERSTITIAL : 'ca-app-pub-1819958924466866/6057938890';
+
+const interstitial = InterstitialAd.createForAdRequest(INTERSTITIAL_ID, {
+  requestNonPersonalizedAdsOnly: true,
+});
 
 interface Player {
   id: string;
@@ -42,6 +51,7 @@ export default function GameScreen() {
 
   useEffect(() => {
     initializeGameOffline();
+    interstitial.load();
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
@@ -160,6 +170,10 @@ export default function GameScreen() {
       intervalRef.current = null;
     }
     Speech.stop();
+
+    if (interstitial.loaded) {
+      interstitial.show();
+    }
 
     await resetGame();
     await AsyncStorage.multiRemove(['current_game', 'generated_tickets', 'admin_selected_ticket']);
@@ -487,6 +501,15 @@ export default function GameScreen() {
           </View>
         </ScrollView>
       </SafeAreaView>
+      <View style={{ alignItems: 'center', paddingBottom: 8 }}>
+        <BannerAd
+          unitId={BANNER_ID}
+          size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
+          requestOptions={{
+            requestNonPersonalizedAdsOnly: true,
+          }}
+        />
+      </View>
     </LinearGradient>
   );
 }

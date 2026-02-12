@@ -47,7 +47,7 @@ export default function TicketsScreen() {
       if (gameData) {
         const parsed = JSON.parse(gameData);
         setTickets(parsed);
-        
+
         // Group tickets by player
         const grouped: { [key: string]: Ticket[] } = {};
         parsed.forEach((ticket: Ticket) => {
@@ -68,7 +68,7 @@ export default function TicketsScreen() {
   const renderTicketCell = (value: number | null, colIndex: number, ticketId: string, rowIndex: number) => {
     const isCalled = value !== null && gameState.calledNumbers.includes(value);
     const isCurrent = value === gameState.currentNumber;
-    
+
     return (
       <View
         key={`${ticketId}-${rowIndex}-${colIndex}`}
@@ -102,7 +102,7 @@ export default function TicketsScreen() {
       <View style={styles.ticketGrid}>
         {ticket.grid.map((row, rowIndex) => (
           <View key={rowIndex} style={styles.row}>
-            {row.map((cell, colIndex) => renderTicketCell(cell, colIndex))}
+            {row.map((cell, colIndex) => renderTicketCell(cell, colIndex, ticket.id, rowIndex))}
           </View>
         ))}
       </View>

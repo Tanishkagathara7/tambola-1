@@ -29,6 +29,7 @@ export default function RootLayout() {
               <Stack.Screen name="prize-config" />
               <Stack.Screen name="prize-category-detail" />
               <Stack.Screen name="game" />
+              <Stack.Screen name="recent-games" />
               <Stack.Screen name="player-tickets" options={{ presentation: 'card' }} />
               <Stack.Screen name="claims" options={{ presentation: 'card' }} />
             </Stack>

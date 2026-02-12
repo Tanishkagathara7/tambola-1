@@ -41,6 +41,11 @@ interface Room {
     prize_type: string;
     amount: number;
   }>;
+  players: Array<{
+    id: string;
+    name: string;
+    profile_pic?: string;
+  }>;
 }
 
 interface Winner {
@@ -153,6 +158,8 @@ export default function LiveGameScreen() {
     socketService.on('game_ended', handleGameEnded);
     socketService.on('game_completed', handleGameCompleted); // Graceful completion
     socketService.on('ticket_updated', handleTicketUpdated); // Auto-marking
+    socketService.on('game_state_sync', handleGameStateSync);
+    socketService.on('points_updated', handlePointsUpdated);
   };
 
   const cleanupSocketListeners = () => {
@@ -164,6 +171,8 @@ export default function LiveGameScreen() {
     socketService.off('game_ended');
     socketService.off('game_completed');
     socketService.off('ticket_updated');
+    socketService.off('game_state_sync');
+    socketService.off('points_updated');
   };
 
   const handleGameCompleted = (data: any) => {
@@ -202,6 +211,34 @@ export default function LiveGameScreen() {
           ? { ...prev, marked_numbers: data.ticket.marked_numbers || [] }
           : prev
       );
+    }
+  };
+
+  const handleGameStateSync = (data: any) => {
+    console.log('Game state sync:', data);
+    setRoom((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        current_number: data.current_number,
+        called_numbers: data.called_numbers || [],
+      };
+    });
+
+    // Auto-mark numbers if we join late
+    if (data.called_numbers && Array.isArray(data.called_numbers)) {
+      data.called_numbers.forEach((num: number) => autoMarkNumber(num));
+    }
+  };
+
+  const handlePointsUpdated = (data: any) => {
+    console.log('Points updated:', data);
+    // You could show a toast here, or just let the user profile update elsewhere
+    // But since we are in game, a nice toast/alert is good.
+    if (data.points_added) {
+      Alert.alert('Points Added!', `You received ${data.points_added} points!`);
+    } else if (data.new_balance) {
+      // Just update silently or small toast
     }
   };
 
@@ -675,6 +712,24 @@ export default function LiveGameScreen() {
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>My Ticket</Text>
               {renderTicket(selectedTicket)}
+            </View>
+          )}
+
+          {/* Players List */}
+          {room.players && room.players.length > 0 && (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Players ({room.players.length})</Text>
+              {room.players.map((player) => (
+                <View key={player.id} style={styles.playerCard}>
+                  <MaterialCommunityIcons name="account-circle" size={32} color="#FFD700" />
+                  <View style={styles.playerInfo}>
+                    <Text style={styles.playerName}>{player.name}</Text>
+                    {player.id === room.host_id && (
+                      <Text style={styles.hostBadge}>Host</Text>
+                    )}
+                  </View>
+                </View>
+              ))}
             </View>
           )}
         </ScrollView>
@@ -1193,5 +1248,30 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
     color: '#FFD700',
+  },
+  playerCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 8,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 215, 0, 0.3)',
+    gap: 12,
+  },
+  playerInfo: {
+    flex: 1,
+  },
+  playerName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFF',
+  },
+  hostBadge: {
+    fontSize: 12,
+    color: '#FFD700',
+    marginTop: 2,
+    fontStyle: 'italic',
   },
 });

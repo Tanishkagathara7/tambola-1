@@ -57,7 +57,7 @@ class User(BaseModel):
     mobile: str
     password_hash: str
     profile_pic: Optional[str] = None
-    wallet_balance: float = 0.0
+    points_balance: float = 0.0
     total_games: int = 0
     total_wins: int = 0
     total_winnings: float = 0.0
@@ -73,7 +73,7 @@ class UserProfile(BaseModel):
     email: EmailStr
     mobile: str
     profile_pic: Optional[str]
-    wallet_balance: float
+    points_balance: float
     total_games: int
     total_wins: int
     total_winnings: float

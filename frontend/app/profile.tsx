@@ -84,7 +84,7 @@ export default function ProfileScreen() {
 
           <View style={styles.card}>
             <Row icon="phone" label="Mobile" value={user.mobile} />
-            <Row icon="wallet" label="Wallet" value={`₹ ${(user.wallet_balance ?? 0).toFixed(2)}`} />
+            <Row icon="star" label="Points" value={`${(user.points_balance ?? 0).toFixed(0)}`} />
             <Row icon="trophy" label="Games played" value={String(user.total_games ?? 0)} />
             <Row icon="medal" label="Wins" value={String(user.total_wins ?? 0)} />
             <Row icon="cash" label="Total winnings" value={`₹ ${(user.total_winnings ?? 0).toFixed(2)}`} />

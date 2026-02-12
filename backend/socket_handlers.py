@@ -64,11 +64,16 @@ async def handle_game_completion(sio, db, room_id):
         
         serialized_winners = [serialize_doc(w) for w in sorted_winners]
         
+        # Distribute remaining pool to Full House if needed (simplified logic for now)
+        # In a real scenario, we'd calculate exact shares here.
+        # For this requirement, we trust the points added during 'claim_prize' or 'end_game'
+        
         # Emit game_completed event (not game_ended)
         await sio.emit('game_completed', {
             'room_id': room_id,
             'winners': serialized_winners,
-            'completed_at': str(datetime.utcnow())
+            'completed_at': str(datetime.utcnow()),
+            'prize_pool': (await db.rooms.find_one({"id": room_id})).get("prize_pool", 0)
         }, room=room_id)
         
         logger.info(f"Game completed in room {room_id} with {len(winners)} winners")
@@ -145,6 +150,16 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
             # Get room data
             room = await db.rooms.find_one({"id": room_id})
             if room:
+                # Check for mid-game join
+                if room.get("status") == "active":
+                    # Emit game_state_sync
+                    await sio.emit('game_state_sync', {
+                        "room_id": room_id,
+                        "called_numbers": room.get("called_numbers", []),
+                        "current_number": room.get("current_number"),
+                        "last_called_at": str(datetime.utcnow()) # Approximate or add field to room
+                    }, room=sid)
+
                 # AUTO GENERATE ONE FREE TICKET FOR PLAYER
                 # Check if player already has a ticket in this room
                 existing_ticket = await db.tickets.find_one({
@@ -435,6 +450,64 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
             await sio.emit('prize_claimed', serialized_winner, room=room_id)
             
             logger.info(f"Prize {prize_type} claimed by {user_id} in room {room_id}")
+            
+            # Use points system - calculate winning amount
+            room_doc = await db.rooms.find_one({"id": room_id})
+            prize_pool = room_doc.get("prize_pool", 0)
+            
+            # Find the prize config percentage/amount from room prizes
+            # Logic: If fixed amount, use it. If percentage, calc from pool.
+            # Simplified: Use the 'amount' field from PrizeConfig. 
+            # If dynamic pool logic requires percentage, it should be stored or calculated here.
+            # PROMPT Requirement: "Winning distribution = % of pool".
+            # Mapping standard percentages if not explicitly set, or assuming 'amount' in prize config was updated.
+            # For this implementation, we will use a simple heuristic:
+            # - Early 5: 10%
+            # - Lines: 10% each
+            # - Corners: 10%
+            # - Full House: 50%
+            # (Adjust based on user configs later if needed)
+            
+            winning_points = 0
+            if prize_pool > 0:
+                if prize_type == 'early_five': winning_points = prize_pool * 0.10
+                elif 'line' in prize_type: winning_points = prize_pool * 0.10
+                elif prize_type == 'four_corners': winning_points = prize_pool * 0.10
+                elif prize_type == 'full_house': winning_points = prize_pool * 0.50
+                else: winning_points = 10 # Default fallback
+            else:
+                 # Fallback to configured amount if pool is 0 (e.g. testing)
+                 # Find prize in room['prizes']
+                 for p in room_doc.get("prizes", []):
+                     if p['prize_type'] == prize_type:
+                         winning_points = p['amount']
+                         break
+
+            # Update winner record with actual amount
+            await db.winners.update_one(
+                {"id": winner_id},
+                {"$set": {"amount": winning_points}}
+            )
+
+            # Credit points to user
+            await db.users.update_one(
+                {"id": user_id},
+                {"$inc": {"points_balance": winning_points, "total_winnings": winning_points, "total_wins": 1}}
+            )
+            
+            # Get updated balance
+            updated_user = await db.users.find_one({"id": user_id})
+            new_balance = updated_user.get("points_balance", 0)
+
+            # Emit points_updated to the WINNER only
+            await sio.emit('points_updated', {
+                'balance': new_balance,
+                'message': f"You won {winning_points} points for {prize_type}!"
+            }, room=sid)
+
+            # Broadcast prize claimed to ALL
+            serialized_winner['amount'] = winning_points 
+            await sio.emit('prize_claimed', serialized_winner, room=room_id)
         
         except Exception as e:
             logger.error(f"Claim prize error: {e}")

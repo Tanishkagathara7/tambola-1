@@ -126,6 +126,10 @@ export const roomAPI = {
     return apiFetch(`/rooms${params ? `?${params}` : ''}`);
   },
 
+  getCompleted: async () => {
+    return apiFetch('/rooms/completed/history');
+  },
+
   createRoom: async (data: {
     name: string;
     room_type: 'public' | 'private';
@@ -187,6 +191,15 @@ export const ticketAPI = {
 
   getMyTickets: async (roomId: string) => {
     return apiFetch(`/tickets/my-tickets/${roomId}`);
+  },
+};
+
+// ============= ADS API =============
+export const adsAPI = {
+  watchRewarded: async () => {
+    return apiFetch('/ads/rewarded', {
+      method: 'POST',
+    });
   },
 };
 
