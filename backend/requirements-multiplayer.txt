@@ -17,3 +17,4 @@ python-socketio>=5.11.0  # Socket.io for real-time
 aiofiles>=23.2.1  # Async file operations
 pillow>=10.0.0  # Image processing
 email-validator>=2.1.0  # Email validation
+argon2-cffi>=23.1.0  # Secure password hashing (no 72-byte limit)

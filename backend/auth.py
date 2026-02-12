@@ -15,7 +15,8 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
 # Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Using argon2 as default to avoid bcrypt's 72-byte limit
+pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
 
 # Bearer token
 security = HTTPBearer()
