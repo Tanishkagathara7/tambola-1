@@ -68,14 +68,20 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const login = async (email: string, password: string) => {
     try {
       const response = await authAPI.login({ email, password });
-      
+
+      console.log('Login response:', JSON.stringify(response, null, 2));
+
+      if (!response || !response.access_token) {
+        throw new Error('Invalid response from server: missing access_token');
+      }
+
       // Save token and user data
       await AsyncStorage.setItem('auth_token', response.access_token);
       await AsyncStorage.setItem('user_data', JSON.stringify(response.user));
-      
+
       setUser(response.user);
     } catch (error: any) {
-      console.error('Login error:', error);
+      console.error('Login error details:', error);
       throw new Error(error.message || 'Login failed');
     }
   };
@@ -83,11 +89,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const signup = async (name: string, email: string, mobile: string, password: string) => {
     try {
       const response = await authAPI.signup({ name, email, mobile, password });
-      
+
       // Save token and user data
       await AsyncStorage.setItem('auth_token', response.access_token);
       await AsyncStorage.setItem('user_data', JSON.stringify(response.user));
-      
+
       setUser(response.user);
     } catch (error: any) {
       console.error('Signup error:', error);
@@ -99,11 +105,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     try {
       // Disconnect socket
       socketService.disconnect();
-      
+
       // Clear storage
       await AsyncStorage.removeItem('auth_token');
       await AsyncStorage.removeItem('user_data');
-      
+
       setUser(null);
     } catch (error) {
       console.error('Logout error:', error);

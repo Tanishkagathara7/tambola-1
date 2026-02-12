@@ -23,7 +23,52 @@ import { useGameState } from '../contexts/GameStateContext';
 import { generateTicketsForPlayers, Ticket } from '../utils/ticketGenerator';
 import { checkPrizeWin, checkCustomPattern } from '../utils/prizeValidator';
 import { PrizeClaim, SelectedPrize } from '../types/claim-types';
-import { BannerAd, BannerAdSize, TestIds, InterstitialAd, AdEventType } from 'react-native-google-mobile-ads';
+
+// Conditional import for google mobile ads (native only)
+let BannerAd: any, BannerAdSize: any, TestIds: any, InterstitialAd: any, AdEventType: any;
+
+if (Platform.OS !== 'web') {
+  try {
+    const mobileAds = require('react-native-google-mobile-ads');
+    BannerAd = mobileAds.BannerAd;
+    BannerAdSize = mobileAds.BannerAdSize;
+    TestIds = mobileAds.TestIds;
+    InterstitialAd = mobileAds.InterstitialAd;
+    AdEventType = mobileAds.AdEventType;
+  } catch (error) {
+    console.warn('Failed to load react-native-google-mobile-ads (likely Expo Go). Using mocks.');
+    // Fallback to mocks
+    TestIds = { BANNER: 'mock', INTERSTITIAL: 'mock' };
+    BannerAdSize = { BANNER: 'BANNER', ANCHORED_ADAPTIVE_BANNER: 'ANCHORED_ADAPTIVE_BANNER' };
+    AdEventType = { LOADED: 'LOADED', CLOSED: 'CLOSED', ERROR: 'ERROR' };
+    BannerAd = () => null;
+    InterstitialAd = {
+      createForAdRequest: () => ({
+        load: () => { console.log('Mock Interstitial loaded'); },
+        show: () => { console.log('Mock Interstitial shown'); },
+        addAdEventListener: (event: any, handler: any) => {
+          if (event === 'LOADED') setTimeout(handler, 100);
+          return () => { };
+        },
+        loaded: true,
+      }),
+    };
+  }
+} else {
+  // Web stubs
+  TestIds = { BANNER: 'mock', INTERSTITIAL: 'mock' };
+  BannerAdSize = { BANNER: 'BANNER', ANCHORED_ADAPTIVE_BANNER: 'ANCHORED_ADAPTIVE_BANNER' };
+  AdEventType = { LOADED: 'LOADED', CLOSED: 'CLOSED', ERROR: 'ERROR' };
+  BannerAd = () => null; // Render nothing on web
+  InterstitialAd = {
+    createForAdRequest: () => ({
+      load: () => { },
+      show: () => { },
+      addAdEventListener: () => () => { },
+      loaded: false,
+    }),
+  };
+}
 
 const { width } = Dimensions.get('window');
 const AUTO_SPEED_SECONDS = 5;
