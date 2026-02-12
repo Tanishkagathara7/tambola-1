@@ -1036,58 +1036,113 @@ async def get_my_tickets(
             "user_id": current_user["id"]
         }).to_list(100)
         
+        logger.info(f"Found {len(tickets)} raw tickets for user {current_user['id']} in room {room_id}")
+        
         # Enrich and serialize tickets
         enriched_tickets = []
-        for ticket in tickets:
-            # Remove MongoDB _id field
-            if "_id" in ticket:
-                del ticket["_id"]
-            
-            # Add user_name if missing (for old tickets)
-            if "user_name" not in ticket or not ticket.get("user_name"):
-                ticket["user_name"] = current_user.get("name", "")
-            
-            # Ensure grid is a proper 2D array
-            if "grid" in ticket:
+        for idx, ticket in enumerate(tickets):
+            try:
+                # Remove MongoDB _id field FIRST
+                if "_id" in ticket:
+                    del ticket["_id"]
+                
+                # Log ticket structure for debugging
+                logger.info(f"Processing ticket {idx}: id={ticket.get('id')}, has_grid={('grid' in ticket)}, grid_type={type(ticket.get('grid'))}")
+                
+                # Add user_name if missing
+                if "user_name" not in ticket or not ticket.get("user_name"):
+                    ticket["user_name"] = current_user.get("name", "")
+                
+                # Validate and fix grid
+                if "grid" not in ticket or ticket["grid"] is None:
+                    logger.warning(f"Ticket {ticket.get('id')} has no grid, regenerating")
+                    # Generate a new grid for this ticket
+                    ticket_data = generate_tambola_ticket(ticket.get("ticket_number", idx + 1))
+                    ticket["grid"] = ticket_data["grid"]
+                    ticket["numbers"] = ticket_data["numbers"]
+                
+                # Ensure grid is a list
                 grid = ticket["grid"]
-                # If grid is a string, try to parse it
-                if isinstance(grid, str):
-                    import json
-                    try:
-                        grid = json.loads(grid)
-                        ticket["grid"] = grid
-                    except:
-                        logger.error(f"Failed to parse grid for ticket {ticket.get('id')}")
-                        ticket["grid"] = [[None] * 9 for _ in range(3)]  # Default empty grid
-                # Ensure it's a list
-                elif not isinstance(grid, list):
-                    logger.error(f"Grid is not a list for ticket {ticket.get('id')}: {type(grid)}")
-                    ticket["grid"] = [[None] * 9 for _ in range(3)]  # Default empty grid
-            else:
-                # No grid field, create empty one
-                ticket["grid"] = [[None] * 9 for _ in range(3)]
-            
-            # Add numbers field if missing (for old tickets)
-            if "numbers" not in ticket and "grid" in ticket:
-                # Extract numbers from grid
-                numbers = []
-                for row in ticket["grid"]:
-                    if isinstance(row, list):
-                        for num in row:
-                            if num is not None and isinstance(num, (int, float)):
-                                numbers.append(int(num))
-                ticket["numbers"] = sorted(numbers)
-            
-            # Ensure marked_numbers exists
-            if "marked_numbers" not in ticket:
-                ticket["marked_numbers"] = []
-            
-            # Serialize to convert datetime to ISO string
-            serialized = serialize_doc(ticket)
-            enriched_tickets.append(serialized)
+                if not isinstance(grid, list):
+                    logger.error(f"Grid is not a list for ticket {ticket.get('id')}: {type(grid)}, regenerating")
+                    ticket_data = generate_tambola_ticket(ticket.get("ticket_number", idx + 1))
+                    ticket["grid"] = ticket_data["grid"]
+                    ticket["numbers"] = ticket_data["numbers"]
+                    grid = ticket["grid"]
+                
+                # Ensure grid has 3 rows
+                if len(grid) != 3:
+                    logger.error(f"Grid doesn't have 3 rows for ticket {ticket.get('id')}: {len(grid)}, regenerating")
+                    ticket_data = generate_tambola_ticket(ticket.get("ticket_number", idx + 1))
+                    ticket["grid"] = ticket_data["grid"]
+                    ticket["numbers"] = ticket_data["numbers"]
+                    grid = ticket["grid"]
+                
+                # Validate each row has 9 columns
+                for row_idx, row in enumerate(grid):
+                    if not isinstance(row, list) or len(row) != 9:
+                        logger.error(f"Row {row_idx} invalid for ticket {ticket.get('id')}, regenerating")
+                        ticket_data = generate_tambola_ticket(ticket.get("ticket_number", idx + 1))
+                        ticket["grid"] = ticket_data["grid"]
+                        ticket["numbers"] = ticket_data["numbers"]
+                        break
+                
+                # Extract numbers if missing
+                if "numbers" not in ticket or not ticket.get("numbers"):
+                    numbers = []
+                    for row in ticket["grid"]:
+                        if isinstance(row, list):
+                            for num in row:
+                                if num is not None and num != 0:
+                                    try:
+                                        numbers.append(int(num))
+                                    except (ValueError, TypeError):
+                                        logger.warning(f"Invalid number in grid: {num}")
+                    ticket["numbers"] = sorted(numbers)
+                
+                # Ensure marked_numbers exists
+                if "marked_numbers" not in ticket:
+                    ticket["marked_numbers"] = []
+                
+                # Ensure all required fields exist
+                if "id" not in ticket:
+                    ticket["id"] = str(uuid.uuid4())
+                if "ticket_number" not in ticket:
+                    ticket["ticket_number"] = idx + 1
+                if "room_id" not in ticket:
+                    ticket["room_id"] = room_id
+                if "user_id" not in ticket:
+                    ticket["user_id"] = current_user["id"]
+                
+                # Serialize to convert datetime to ISO string
+                serialized = serialize_doc(ticket)
+                enriched_tickets.append(serialized)
+                logger.info(f"Successfully processed ticket {ticket.get('id')}")
+                
+            except Exception as e:
+                logger.error(f"Error processing ticket {ticket.get('id', idx)}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                # Don't skip - try to create a minimal valid ticket
+                try:
+                    ticket_data = generate_tambola_ticket(idx + 1)
+                    minimal_ticket = {
+                        "id": ticket.get("id", str(uuid.uuid4())),
+                        "ticket_number": ticket.get("ticket_number", idx + 1),
+                        "user_id": current_user["id"],
+                        "user_name": current_user.get("name", ""),
+                        "room_id": room_id,
+                        "grid": ticket_data["grid"],
+                        "numbers": ticket_data["numbers"],
+                        "marked_numbers": []
+                    }
+                    enriched_tickets.append(serialize_doc(minimal_ticket))
+                    logger.info(f"Created minimal ticket for index {idx}")
+                except Exception as e2:
+                    logger.error(f"Failed to create minimal ticket: {e2}")
+                    continue
         
-        logger.info(f"Found {len(enriched_tickets)} tickets for user {current_user['id']} in room {room_id}")
-        
+        logger.info(f"Returning {len(enriched_tickets)} valid tickets")
         return enriched_tickets
     except Exception as e:
         logger.error(f"Error fetching tickets: {e}")
