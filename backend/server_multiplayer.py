@@ -1036,15 +1036,38 @@ async def get_my_tickets(
             "user_id": current_user["id"]
         }).to_list(100)
         
-        # Serialize tickets to remove ObjectId
-        serialized_tickets = [serialize_doc(t) for t in tickets]
+        # Enrich and serialize tickets
+        enriched_tickets = []
+        for ticket in tickets:
+            # Remove MongoDB _id field
+            if "_id" in ticket:
+                del ticket["_id"]
+            
+            # Add user_name if missing (for old tickets)
+            if "user_name" not in ticket or not ticket.get("user_name"):
+                ticket["user_name"] = current_user.get("name", "")
+            
+            # Add numbers field if missing (for old tickets)
+            if "numbers" not in ticket and "grid" in ticket:
+                # Extract numbers from grid
+                numbers = []
+                for row in ticket["grid"]:
+                    for num in row:
+                        if num is not None:
+                            numbers.append(num)
+                ticket["numbers"] = sorted(numbers)
+            
+            # Serialize to convert datetime to ISO string
+            serialized = serialize_doc(ticket)
+            enriched_tickets.append(serialized)
         
-        logger.info(f"Found {len(serialized_tickets)} tickets for user {current_user['id']} in room {room_id}")
+        logger.info(f"Found {len(enriched_tickets)} tickets for user {current_user['id']} in room {room_id}")
         
-        # Return empty array if no tickets (not an error)
-        return serialized_tickets
+        return enriched_tickets
     except Exception as e:
         logger.error(f"Error fetching tickets: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         # Return empty array instead of error
         return []
 
