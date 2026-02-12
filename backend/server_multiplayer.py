@@ -551,10 +551,13 @@ async def join_room(
         }
     )
     
+    # Serialize player for socket emission (convert datetime to string)
+    serialized_player = serialize_doc(player)
+    
     # Broadcast player joined
     await sio.emit('player_joined', {
         "room_id": room_id,
-        "player": player
+        "player": serialized_player
     }, room=room_id)
     
     return MessageResponse(message="Joined room successfully", data={"room_id": room_id})
@@ -1090,13 +1093,16 @@ async def buy_tickets(
                 "id": ticket_id,
                 "room_id": room_id,
                 "user_id": current_user["id"],
+                "user_name": current_user["name"],  # Add user_name field
                 "ticket_number": ticket_number,
-                "grid": ticket_grid,
+                "grid": ticket_grid["grid"],  # Extract grid from result
+                "numbers": ticket_grid["numbers"],  # Extract numbers from result
                 "marked_numbers": [],
                 "created_at": datetime.utcnow()
             }
             
             await db.tickets.insert_one(new_ticket)
+            # Serialize to remove ObjectId and convert datetime
             tickets_created.append(serialize_doc(new_ticket))
         
         logger.info(f"User {current_user['id']} bought {quantity} tickets for room {room_id}")
