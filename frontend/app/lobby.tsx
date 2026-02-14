@@ -8,6 +8,7 @@ import {
   RefreshControl,
   Alert,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -15,6 +16,39 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../contexts/AuthContext';
 import { roomAPI, adsAPI } from '../services/api';
+
+// Google Mobile Ads imports (with fallback for Expo Go)
+let RewardedAd: any, RewardedAdEventType: any, TestIds: any, AdEventType: any;
+let adsAvailable = false;
+
+try {
+  const mobileAds = require('react-native-google-mobile-ads');
+  RewardedAd = mobileAds.RewardedAd;
+  RewardedAdEventType = mobileAds.RewardedAdEventType;
+  TestIds = mobileAds.TestIds;
+  AdEventType = mobileAds.AdEventType;
+  adsAvailable = true;
+} catch (error) {
+  console.warn('Google Mobile Ads not available (likely Expo Go). Using fallback.');
+  // Mock implementations
+  RewardedAd = {
+    createForAdRequest: () => ({
+      addAdEventListener: () => () => {},
+      load: () => {},
+      show: () => {},
+    })
+  };
+  RewardedAdEventType = { LOADED: 'loaded', EARNED_REWARD: 'earned_reward' };
+  TestIds = { REWARDED: 'test-rewarded' };
+  AdEventType = { ERROR: 'error', CLOSED: 'closed' };
+  adsAvailable = false;
+}
+
+// Create rewarded ad instance
+const adUnitId = __DEV__ ? TestIds.REWARDED : 'ca-app-pub-3940256099942544/5224354917';
+const rewardedAd = RewardedAd.createForAdRequest(adUnitId, {
+  requestNonPersonalizedAdsOnly: true,
+});
 
 interface Room {
   id: string;
@@ -36,9 +70,13 @@ export default function LobbyScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<'all' | 'public' | 'private'>('all');
+  const [adLoaded, setAdLoaded] = useState(false);
+  const [adLoading, setAdLoading] = useState(false);
+  const [joiningRoomId, setJoiningRoomId] = useState<string | null>(null);
 
   useEffect(() => {
     loadRooms();
+    const cleanup = loadRewardedAd();
 
     // Ensure socket is connected for real-time updates
     import('../services/socket').then(({ socketService }) => {
@@ -48,7 +86,71 @@ export default function LobbyScreen() {
         });
       }
     });
+
+    // Cleanup function
+    return cleanup;
   }, [filter]);
+
+  const loadRewardedAd = () => {
+    if (!adsAvailable) {
+      // In fallback mode, always show as "ready"
+      setAdLoaded(true);
+      setAdLoading(false);
+      return () => {}; // No cleanup needed
+    }
+
+    setAdLoading(true);
+    setAdLoaded(false);
+
+    const unsubscribeLoaded = rewardedAd.addAdEventListener(RewardedAdEventType.LOADED, () => {
+      setAdLoaded(true);
+      setAdLoading(false);
+      console.log('Rewarded ad loaded');
+    });
+
+    const unsubscribeEarned = rewardedAd.addAdEventListener(
+      RewardedAdEventType.EARNED_REWARD,
+      (reward: any) => {
+        console.log('User earned reward of ', reward);
+        // Call backend API to credit points
+        handleAdReward();
+      },
+    );
+
+    const unsubscribeError = rewardedAd.addAdEventListener(AdEventType.ERROR, (error: any) => {
+      console.error('Rewarded ad error:', error);
+      setAdLoading(false);
+      Alert.alert('Ad Error', 'Failed to load ad. Please try again later.');
+    });
+
+    const unsubscribeClosed = rewardedAd.addAdEventListener(AdEventType.CLOSED, () => {
+      console.log('Rewarded ad closed');
+      // Reload ad for next time
+      loadRewardedAd();
+    });
+
+    // Load the ad
+    rewardedAd.load();
+
+    // Return cleanup function
+    return () => {
+      unsubscribeLoaded();
+      unsubscribeEarned();
+      unsubscribeError();
+      unsubscribeClosed();
+    };
+  };
+
+  const handleAdReward = async () => {
+    try {
+      await adsAPI.watchRewarded();
+      Alert.alert('Success!', 'You earned 10 points for watching the ad!');
+      // You might want to refresh user profile here to update points display
+    } catch (error) {
+      console.error('Error crediting ad reward:', error);
+      Alert.alert('Error', 'Failed to credit reward points');
+    }
+  };
 
   const loadRooms = async () => {
     try {
@@ -79,8 +181,6 @@ export default function LobbyScreen() {
     setRefreshing(true);
     loadRooms();
   };
-
-  const [joiningRoomId, setJoiningRoomId] = useState<string | null>(null);
 
   const handleJoinRoom = async (room: Room) => {
     if (joiningRoomId) return; // Prevent double click
@@ -132,15 +232,34 @@ export default function LobbyScreen() {
   };
 
   const handleWatchAd = async () => {
+    if (!adsAvailable) {
+      // Fallback: directly call API for testing
+      try {
+        await adsAPI.watchRewarded();
+        Alert.alert('Success!', 'You earned 10 points! (Test mode - no ad shown)');
+      } catch (error) {
+        console.error('Error crediting ad reward:', error);
+        Alert.alert('Error', 'Failed to credit reward points');
+      }
+      return;
+    }
+
+    if (!adLoaded) {
+      if (adLoading) {
+        Alert.alert('Loading...', 'Ad is still loading. Please wait a moment.');
+      } else {
+        Alert.alert('No Ad Available', 'Please try again in a few moments.');
+        loadRewardedAd(); // Try to reload
+      }
+      return;
+    }
+
     try {
-      // In a real app, show ad here
-      await adsAPI.watchRewarded();
-      Alert.alert('Success', 'You earned 10 points!');
-      // Refresh user profile to update points
-      // useAuth().refreshProfile(); // Assuming this exists or simple context update
-      // Since context update might be async/complex, we let the context handle it if it listens or just wait for next profile fetch
+      // Show the rewarded ad
+      rewardedAd.show();
     } catch (error) {
-      Alert.alert('Error', 'Failed to watch ad');
+      console.error('Error showing ad:', error);
+      Alert.alert('Error', 'Failed to show ad');
     }
   };
 
@@ -235,11 +354,32 @@ export default function LobbyScreen() {
               <ActivityIndicator size="small" color="#FFD700" style={{ marginRight: 8 }} />
             )}
             <TouchableOpacity
-              style={styles.adButton}
+              style={[
+                styles.adButton,
+                (!adLoaded && !adLoading) && styles.adButtonDisabled,
+                adLoading && styles.adButtonLoading
+              ]}
               onPress={handleWatchAd}
+              disabled={!adLoaded}
             >
-              <MaterialCommunityIcons name="play-circle" size={20} color="#1a5f1a" />
-              <Text style={styles.adButtonText}>+10 Pts</Text>
+              {adLoading ? (
+                <>
+                  <ActivityIndicator size="small" color="#1a5f1a" />
+                  <Text style={styles.adButtonText}>Loading...</Text>
+                </>
+              ) : adLoaded ? (
+                <>
+                  <MaterialCommunityIcons name="play-circle" size={20} color="#1a5f1a" />
+                  <Text style={styles.adButtonText}>
+                    {adsAvailable ? 'Watch Ad +10 Pts' : 'Test +10 Pts'}
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <MaterialCommunityIcons name="refresh" size={20} color="#999" />
+                  <Text style={[styles.adButtonText, { color: '#999' }]}>No Ad</Text>
+                </>
+              )}
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.walletButton}
@@ -536,6 +676,13 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     gap: 4,
     marginRight: 8,
+  },
+  adButtonDisabled: {
+    backgroundColor: '#CCC',
+    opacity: 0.6,
+  },
+  adButtonLoading: {
+    backgroundColor: '#FFE55C',
   },
   adButtonText: {
     fontSize: 12,
