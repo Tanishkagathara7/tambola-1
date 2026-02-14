@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -16,6 +16,39 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../contexts/AuthContext';
 import { roomAPI, adsAPI } from '../services/api';
+
+// Google Mobile Ads imports (with fallback for Expo Go)
+let RewardedAd: any, RewardedAdEventType: any, TestIds: any, AdEventType: any;
+let adsAvailable = false;
+
+try {
+  const mobileAds = require('react-native-google-mobile-ads');
+  RewardedAd = mobileAds.RewardedAd;
+  RewardedAdEventType = mobileAds.RewardedAdEventType;
+  TestIds = mobileAds.TestIds;
+  AdEventType = mobileAds.AdEventType;
+  adsAvailable = true;
+} catch (error) {
+  console.warn('Google Mobile Ads not available (likely Expo Go). Using fallback.');
+  // Mock implementations
+  RewardedAd = {
+    createForAdRequest: () => ({
+      addAdEventListener: () => () => {},
+      load: () => {},
+      show: () => {},
+    })
+  };
+  RewardedAdEventType = { LOADED: 'loaded', EARNED_REWARD: 'earned_reward' };
+  TestIds = { REWARDED: 'test-rewarded' };
+  AdEventType = { ERROR: 'error', CLOSED: 'closed' };
+  adsAvailable = false;
+}
+
+// Create rewarded ad instance
+const adUnitId = __DEV__ ? TestIds.REWARDED : 'ca-app-pub-3940256099942544/5224354917';
+const rewardedAd = RewardedAd.createForAdRequest(adUnitId, {
+  requestNonPersonalizedAdsOnly: true,
+});
 
 interface Room {
   id: string;
@@ -148,8 +181,6 @@ export default function LobbyScreen() {
     setRefreshing(true);
     loadRooms();
   };
-
-  const [joiningRoomId, setJoiningRoomId] = useState<string | null>(null);
 
   const handleJoinRoom = async (room: Room) => {
     if (joiningRoomId) return; // Prevent double click
