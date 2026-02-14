@@ -11,8 +11,24 @@ import uuid
 logger = logging.getLogger(__name__)
 
 # Store active connections
-active_connections: Dict[str, str] = {}  # sid -> user_id
+active_connections: Dict[str, str] = {}  # sid -> user_id++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
 user_rooms: Dict[str, str] = {}  # user_id -> room_id
+
+
+def check_four_corners(grid, marked):
+    """Check if four corners are marked"""
+    try:
+        corners = []
+        for row_idx in [0, 2]:  # Top and bottom rows
+            row = grid[row_idx]
+            # Find first and last non-None numbers
+            non_none = [n for n in row if n is not None]
+            if len(non_none) >= 2:
+                corners.append(non_none[0])
+                corners.append(non_none[-1])
+        return len(corners) == 4 and all(c in marked for c in corners)
+    except Exception:
+        return False
 
 
 def serialize_doc(doc: Any) -> Any:
@@ -289,9 +305,13 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
                 }
             )
             
-            # AUTO-MARK ALL TICKETS IN THE ROOM
+            # AUTO-MARK ALL TICKETS IN THE ROOM AND AUTO-CLAIM PRIZES
             # Get all tickets for this room
             tickets = await db.tickets.find({"room_id": room_id}).to_list(1000)
+            
+            # Get room data for prize pool
+            room_doc = await db.rooms.find_one({"id": room_id})
+            prize_pool = room_doc.get("prize_pool", 0)
             
             for ticket in tickets:
                 # Check if number exists in ticket grid
@@ -330,6 +350,9 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
                             {"$set": {"marked_numbers": marked}}
                         )
                         
+                        # Update the ticket object for pattern checking
+                        ticket['marked_numbers'] = marked
+                        
                         # Emit ticket_updated event to the specific user
                         serialized_ticket = serialize_doc(ticket)
                         serialized_ticket['marked_numbers'] = marked
@@ -338,6 +361,139 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
                             'ticket': serialized_ticket,
                             'number': number
                         }, room=room_id)
+                
+                # AUTO-CLAIM PRIZES: Check if any prize pattern is complete
+                marked = ticket.get('marked_numbers', [])
+                if not isinstance(marked, list):
+                    marked = []
+                
+                logger.info(f"Checking patterns for ticket {ticket.get('id')} - marked: {len(marked)} numbers")
+                
+                # Define prize types to check in order
+                def check_early_five():
+                    # Early five: first 5 called numbers that match this ticket
+                    ticket_numbers = [n for row in grid for n in row if n is not None]
+                    matching_called = [n for n in called_numbers if n in ticket_numbers]
+                    result = len(matching_called) >= 5
+                    logger.info(f"Early five check: {len(matching_called)}/5 matching called numbers - {result}")
+                    return result
+                
+                def check_top_line():
+                    top_row_numbers = [n for n in grid[0] if n is not None]
+                    result = len(top_row_numbers) > 0 and all(n in marked for n in top_row_numbers)
+                    logger.info(f"Top line check: {top_row_numbers} - all marked: {result}")
+                    return result
+                
+                def check_middle_line():
+                    middle_row_numbers = [n for n in grid[1] if n is not None]
+                    result = len(middle_row_numbers) > 0 and all(n in marked for n in middle_row_numbers)
+                    logger.info(f"Middle line check: {middle_row_numbers} - all marked: {result}")
+                    return result
+                
+                def check_bottom_line():
+                    bottom_row_numbers = [n for n in grid[2] if n is not None]
+                    result = len(bottom_row_numbers) > 0 and all(n in marked for n in bottom_row_numbers)
+                    logger.info(f"Bottom line check: {bottom_row_numbers} - all marked: {result}")
+                    return result
+                
+                def check_full_house():
+                    all_numbers = [n for row in grid for n in row if n is not None]
+                    result = len(all_numbers) > 0 and all(n in marked for n in all_numbers)
+                    logger.info(f"Full house check: {len(all_numbers)} total numbers - all marked: {result}")
+                    return result
+                
+                prize_checks = [
+                    ('early_five', check_early_five),
+                    ('top_line', check_top_line),
+                    ('middle_line', check_middle_line),
+                    ('bottom_line', check_bottom_line),
+                    ('four_corners', lambda: check_four_corners(grid, marked)),
+                    ('full_house', check_full_house)
+                ]
+                
+                for prize_type, check_func in prize_checks:
+                    # Check if prize already claimed
+                    existing_winner = await db.winners.find_one({
+                        "room_id": room_id,
+                        "prize_type": prize_type
+                    })
+                    
+                    if existing_winner:
+                        continue  # Prize already claimed
+                    
+                    # Check if pattern is complete
+                    try:
+                        if check_func():
+                            logger.info(f"AUTO-CLAIMING: Prize {prize_type} for ticket {ticket.get('id')} in room {room_id}")
+                            
+                            # AUTO-CLAIM THIS PRIZE
+                            winner_id = str(uuid.uuid4())
+                            ticket_user_id = ticket.get('user_id')
+                            
+                            # Calculate winning points based on standard percentages
+                            winning_points = 0
+                            if prize_pool > 0:
+                                # Standard prize distribution percentages (same as offline)
+                                if prize_type == 'early_five': 
+                                    winning_points = prize_pool * 0.15  # 15% for Early Five
+                                elif prize_type == 'top_line': 
+                                    winning_points = prize_pool * 0.15  # 15% for Top Line
+                                elif prize_type == 'middle_line': 
+                                    winning_points = prize_pool * 0.15  # 15% for Middle Line
+                                elif prize_type == 'bottom_line': 
+                                    winning_points = prize_pool * 0.15  # 15% for Bottom Line
+                                elif prize_type == 'four_corners': 
+                                    winning_points = prize_pool * 0.10  # 10% for Four Corners
+                                elif prize_type == 'full_house': 
+                                    winning_points = prize_pool * 0.30  # 30% for Full House
+                            else:
+                                # Fallback to configured amount if pool is 0
+                                for p in room_doc.get("prizes", []):
+                                    if p.get('prize_type') == prize_type:
+                                        winning_points = p.get('amount', 10)
+                                        break
+                                if winning_points == 0:
+                                    winning_points = 10  # Default fallback
+                            
+                            # Create winner record
+                            winner = {
+                                "id": winner_id,
+                                "room_id": room_id,
+                                "user_id": ticket_user_id,
+                                "ticket_id": ticket.get('id'),
+                                "ticket_number": ticket.get('ticket_number'),
+                                "prize_type": prize_type,
+                                "amount": winning_points,
+                                "claimed_at": datetime.utcnow(),
+                                "auto_claimed": True
+                            }
+                            
+                            await db.winners.insert_one(winner)
+                            
+                            # Credit points to user
+                            await db.users.update_one(
+                                {"id": ticket_user_id},
+                                {"$inc": {
+                                    "points_balance": winning_points, 
+                                    "total_winnings": winning_points, 
+                                    "total_wins": 1
+                                }}
+                            )
+                            
+                            # Get user info for broadcast
+                            winner_user = await db.users.find_one({"id": ticket_user_id})
+                            winner_name = winner_user.get('name', 'Unknown') if winner_user else 'Unknown'
+                            
+                            # Broadcast prize claimed to ALL players
+                            serialized_winner = serialize_doc(winner)
+                            serialized_winner['user_name'] = winner_name
+                            
+                            await sio.emit('prize_claimed', serialized_winner, room=room_id)
+                            
+                            logger.info(f"AUTO-CLAIMED: Prize {prize_type} for user {ticket_user_id} in room {room_id} - {winning_points} points")
+                    
+                    except Exception as e:
+                        logger.error(f"Error checking prize {prize_type}: {e}")
             
             # Check if all numbers have been called
             game_complete = len(called_numbers) >= 90
@@ -391,42 +547,39 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
             marked = ticket.get('marked_numbers', [])
             is_valid = False
             
+            # Get room to access called numbers for early five validation
+            room_doc = await db.rooms.find_one({"id": room_id})
+            called_numbers = room_doc.get('called_numbers', []) if room_doc else []
+            
             if prize_type == 'early_five':
-                # First 5 numbers marked
-                marked_count = len(marked)
-                is_valid = marked_count >= 5
+                # Early five: first 5 called numbers that match this ticket
+                ticket_numbers = [n for row in grid for n in row if n is not None]
+                matching_called = [n for n in called_numbers if n in ticket_numbers]
+                is_valid = len(matching_called) >= 5
             
             elif prize_type == 'top_line':
                 # All numbers in top row marked
                 top_row = [n for n in grid[0] if n is not None]
-                is_valid = all(n in marked for n in top_row)
+                is_valid = len(top_row) > 0 and all(n in marked for n in top_row)
             
             elif prize_type == 'middle_line':
                 # All numbers in middle row marked
                 middle_row = [n for n in grid[1] if n is not None]
-                is_valid = all(n in marked for n in middle_row)
+                is_valid = len(middle_row) > 0 and all(n in marked for n in middle_row)
             
             elif prize_type == 'bottom_line':
                 # All numbers in bottom row marked
                 bottom_row = [n for n in grid[2] if n is not None]
-                is_valid = all(n in marked for n in bottom_row)
+                is_valid = len(bottom_row) > 0 and all(n in marked for n in bottom_row)
             
             elif prize_type == 'four_corners':
                 # Four corners marked
-                corners = []
-                for row_idx in [0, 2]:  # Top and bottom rows
-                    row = grid[row_idx]
-                    # Find first and last non-None numbers
-                    non_none = [n for n in row if n is not None]
-                    if len(non_none) >= 2:
-                        corners.append(non_none[0])
-                        corners.append(non_none[-1])
-                is_valid = len(corners) == 4 and all(c in marked for c in corners)
+                is_valid = check_four_corners(grid, marked)
             
             elif prize_type == 'full_house':
                 # All numbers in ticket marked
                 all_numbers = [n for row in grid for n in row if n is not None]
-                is_valid = all(n in marked for n in all_numbers)
+                is_valid = len(all_numbers) > 0 and all(n in marked for n in all_numbers)
             
             if not is_valid:
                 await sio.emit('error', {'message': 'Invalid claim - pattern not complete'}, room=sid)
@@ -445,43 +598,36 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
             
             await db.winners.insert_one(winner)
             
-            # Broadcast prize claimed
-            serialized_winner = serialize_doc(winner)
-            await sio.emit('prize_claimed', serialized_winner, room=room_id)
-            
-            logger.info(f"Prize {prize_type} claimed by {user_id} in room {room_id}")
-            
-            # Use points system - calculate winning amount
+            # Get room data for prize pool calculation
             room_doc = await db.rooms.find_one({"id": room_id})
             prize_pool = room_doc.get("prize_pool", 0)
             
-            # Find the prize config percentage/amount from room prizes
-            # Logic: If fixed amount, use it. If percentage, calc from pool.
-            # Simplified: Use the 'amount' field from PrizeConfig. 
-            # If dynamic pool logic requires percentage, it should be stored or calculated here.
-            # PROMPT Requirement: "Winning distribution = % of pool".
-            # Mapping standard percentages if not explicitly set, or assuming 'amount' in prize config was updated.
-            # For this implementation, we will use a simple heuristic:
-            # - Early 5: 10%
-            # - Lines: 10% each
-            # - Corners: 10%
-            # - Full House: 50%
-            # (Adjust based on user configs later if needed)
-            
+            # Calculate winning points based on standard percentages (same as offline)
             winning_points = 0
             if prize_pool > 0:
-                if prize_type == 'early_five': winning_points = prize_pool * 0.10
-                elif 'line' in prize_type: winning_points = prize_pool * 0.10
-                elif prize_type == 'four_corners': winning_points = prize_pool * 0.10
-                elif prize_type == 'full_house': winning_points = prize_pool * 0.50
-                else: winning_points = 10 # Default fallback
+                # Standard prize distribution percentages
+                if prize_type == 'early_five': 
+                    winning_points = prize_pool * 0.15  # 15% for Early Five
+                elif prize_type == 'top_line': 
+                    winning_points = prize_pool * 0.15  # 15% for Top Line
+                elif prize_type == 'middle_line': 
+                    winning_points = prize_pool * 0.15  # 15% for Middle Line
+                elif prize_type == 'bottom_line': 
+                    winning_points = prize_pool * 0.15  # 15% for Bottom Line
+                elif prize_type == 'four_corners': 
+                    winning_points = prize_pool * 0.10  # 10% for Four Corners
+                elif prize_type == 'full_house': 
+                    winning_points = prize_pool * 0.30  # 30% for Full House
+                else: 
+                    winning_points = 10  # Default fallback
             else:
                  # Fallback to configured amount if pool is 0 (e.g. testing)
-                 # Find prize in room['prizes']
                  for p in room_doc.get("prizes", []):
                      if p['prize_type'] == prize_type:
                          winning_points = p['amount']
                          break
+                 if winning_points == 0:
+                     winning_points = 10  # Default fallback
 
             # Update winner record with actual amount
             await db.winners.update_one(
@@ -698,4 +844,55 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
         
         except Exception as e:
             logger.error(f"End game error: {e}")
+            await sio.emit('error', {'message': str(e)}, room=sid)
+    
+    @sio.event
+    async def delete_room(sid, data):
+        """Delete a room (host only) via socket"""
+        try:
+            room_id = data.get('room_id')
+            user_id = active_connections.get(sid)
+            
+            # Get room
+            room = await db.rooms.find_one({"id": room_id})
+            if not room:
+                await sio.emit('error', {'message': 'Room not found'}, room=sid)
+                return
+            
+            # Check if user is host
+            if room['host_id'] != user_id:
+                await sio.emit('error', {'message': 'Only host can delete room'}, room=sid)
+                return
+            
+            # Check if game is active
+            if room.get('status') == 'active':
+                await sio.emit('error', {
+                    'message': 'Cannot delete room while game is active. Please end the game first.'
+                }, room=sid)
+                return
+            
+            # Delete associated data
+            tickets_result = await db.tickets.delete_many({"room_id": room_id})
+            winners_result = await db.winners.delete_many({"room_id": room_id})
+            
+            # Delete the room
+            await db.rooms.delete_one({"id": room_id})
+            
+            # Notify all players in the room
+            await sio.emit('room_deleted', {
+                'room_id': room_id,
+                'message': 'Room has been deleted by the host'
+            }, room=room_id)
+            
+            # Notify the host
+            await sio.emit('room_delete_success', {
+                'room_id': room_id,
+                'tickets_deleted': tickets_result.deleted_count,
+                'winners_deleted': winners_result.deleted_count
+            }, room=sid)
+            
+            logger.info(f"Room {room_id} deleted by host {user_id} via socket")
+        
+        except Exception as e:
+            logger.error(f"Delete room error: {e}")
             await sio.emit('error', {'message': str(e)}, room=sid)

@@ -63,7 +63,6 @@ export default function LiveGameScreen() {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
   const [showTicketModal, setShowTicketModal] = useState(false);
-  const [showClaimModal, setShowClaimModal] = useState(false);
   const [showWinnersModal, setShowWinnersModal] = useState(false);
   const [winners, setWinners] = useState<Winner[]>([]);
   const [autoCall, setAutoCall] = useState(false);
@@ -92,7 +91,12 @@ export default function LiveGameScreen() {
 
   useEffect(() => {
     if (room?.current_number && soundEnabled) {
-      Speech.speak(String(room.current_number), { rate: 0.9 });
+      // Faster speech rate for better gameplay
+      Speech.speak(String(room.current_number), { 
+        rate: 1.2,  // Faster than default
+        pitch: 1.0,
+        language: 'en-US'
+      });
     }
   }, [room?.current_number, soundEnabled]);
 
@@ -160,6 +164,7 @@ export default function LiveGameScreen() {
     socketService.on('ticket_updated', handleTicketUpdated); // Auto-marking
     socketService.on('game_state_sync', handleGameStateSync);
     socketService.on('points_updated', handlePointsUpdated);
+    socketService.on('room_deleted', handleRoomDeleted); // Room deletion
   };
 
   const cleanupSocketListeners = () => {
@@ -173,6 +178,7 @@ export default function LiveGameScreen() {
     socketService.off('ticket_updated');
     socketService.off('game_state_sync');
     socketService.off('points_updated');
+    socketService.off('room_deleted');
   };
 
   const handleGameCompleted = (data: any) => {
@@ -240,6 +246,20 @@ export default function LiveGameScreen() {
     } else if (data.new_balance) {
       // Just update silently or small toast
     }
+  };
+
+  const handleRoomDeleted = (data: any) => {
+    console.log('Room deleted:', data);
+    Alert.alert(
+      'Room Deleted',
+      'This room has been deleted by the host.',
+      [
+        {
+          text: 'OK',
+          onPress: () => router.replace('/lobby'),
+        },
+      ]
+    );
   };
 
   const handleGameStarted = (data: any) => {
@@ -320,7 +340,30 @@ export default function LiveGameScreen() {
 
   const handlePrizeClaimed = (data: any) => {
     console.log('Prize claimed:', data);
-    Alert.alert('Prize Claimed!', `${data.user_name} claimed ${data.prize_type}`);
+    
+    // Show different messages for auto-claimed vs manual claimed
+    const prizeDisplayName = data.prize_type.replace('_', ' ').toUpperCase();
+    const winnerName = data.user_name || 'Someone';
+    const amount = data.amount || 0;
+    
+    if (data.auto_claimed) {
+      Alert.alert(
+        '🎉 Auto Prize Won! 🎉', 
+        `${winnerName} automatically won ${prizeDisplayName} - ₹${amount}!`,
+        [{ text: 'Awesome!', style: 'default' }]
+      );
+    } else {
+      Alert.alert(
+        '🏆 Prize Claimed! 🏆', 
+        `${winnerName} claimed ${prizeDisplayName} - ₹${amount}!`,
+        [{ text: 'Congratulations!', style: 'default' }]
+      );
+    }
+    
+    // Play celebration sound if enabled
+    if (soundEnabled) {
+      Speech.speak(`${prizeDisplayName} won by ${winnerName}!`, { rate: 1.0 });
+    }
   };
 
   const handleWinnerAnnounced = (data: any) => {
@@ -377,7 +420,7 @@ export default function LiveGameScreen() {
       handleCallNumber(); // Call first number immediately
       autoCallInterval.current = setInterval(() => {
         handleCallNumber();
-      }, 5000); // Every 5 seconds
+      }, 3000); // Every 3 seconds - faster gameplay
       setAutoCall(true);
     }
   };
@@ -397,6 +440,53 @@ export default function LiveGameScreen() {
           text: 'End Game',
           style: 'destructive',
           onPress: () => socketService.endGame(params.id),
+        },
+      ]
+    );
+  };
+
+  const handleDeleteRoom = () => {
+    if (!room) return;
+
+    // Check if game is active
+    if (room.called_numbers && room.called_numbers.length > 0) {
+      Alert.alert(
+        'Cannot Delete',
+        'You cannot delete a room while the game is active. Please end the game first.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    Alert.alert(
+      'Delete Room',
+      'Are you sure you want to delete this room? This will permanently remove the room and all associated data. All players will be notified.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // Use socket for real-time deletion
+              socketService.deleteRoom(params.id);
+              
+              // Show success message
+              Alert.alert(
+                'Room Deleted',
+                'The room has been deleted successfully.',
+                [
+                  {
+                    text: 'OK',
+                    onPress: () => router.replace('/lobby'),
+                  },
+                ]
+              );
+            } catch (error: any) {
+              console.error('Delete room error:', error);
+              Alert.alert('Error', error.message || 'Failed to delete room');
+            }
+          },
         },
       ]
     );
@@ -441,61 +531,6 @@ export default function LiveGameScreen() {
     });
   };
 
-  const checkWin = (prizeType: string): boolean => {
-    if (!selectedTicket || !room) return false;
-
-    const grid = selectedTicket.grid;
-    const marked = selectedTicket.marked_numbers;
-
-    switch (prizeType) {
-      case 'early_five':
-        return marked.length >= 5;
-
-      case 'top_line':
-        const topLine = grid[0].filter((n) => n !== null);
-        return topLine.every((n) => marked.includes(n!));
-
-      case 'middle_line':
-        const middleLine = grid[1].filter((n) => n !== null);
-        return middleLine.every((n) => marked.includes(n!));
-
-      case 'bottom_line':
-        const bottomLine = grid[2].filter((n) => n !== null);
-        return bottomLine.every((n) => marked.includes(n!));
-
-      case 'four_corners':
-        const corners = [
-          grid[0].find((n) => n !== null),
-          grid[0].reverse().find((n) => n !== null),
-          grid[2].find((n) => n !== null),
-          grid[2].reverse().find((n) => n !== null),
-        ].filter((n) => n !== null);
-        grid[0].reverse();
-        grid[2].reverse();
-        return corners.every((n) => marked.includes(n!));
-
-      case 'full_house':
-        const allNumbers = grid.flat().filter((n) => n !== null);
-        return allNumbers.every((n) => marked.includes(n!));
-
-      default:
-        return false;
-    }
-  };
-
-  const handleClaimPrize = (prizeType: string) => {
-    if (!selectedTicket || !room) return;
-
-    if (!checkWin(prizeType)) {
-      Alert.alert('Invalid Claim', 'You have not completed this pattern yet');
-      return;
-    }
-
-    socketService.claimPrize(params.id, selectedTicket.id, prizeType);
-    setShowClaimModal(false);
-    Alert.alert('Claim Submitted', 'Your claim is being verified...');
-  };
-
   const renderNumberGrid = () => {
     if (!room) return null;
 
@@ -535,20 +570,63 @@ export default function LiveGameScreen() {
   };
 
   const renderTicket = (ticket: Ticket) => {
+    // Check completed patterns for visual indicators
+    const checkPattern = (patternType: string): boolean => {
+      if (!room) return false;
+      const grid = ticket.grid;
+      const marked = ticket.marked_numbers;
+      const called = room.called_numbers;
+
+      switch (patternType) {
+        case 'early_five':
+          return marked.filter(n => called.includes(n)).length >= 5;
+        case 'top_line':
+          const topLine = grid[0].filter((n) => n !== null);
+          return topLine.every((n) => marked.includes(n!));
+        case 'middle_line':
+          const middleLine = grid[1].filter((n) => n !== null);
+          return middleLine.every((n) => marked.includes(n!));
+        case 'bottom_line':
+          const bottomLine = grid[2].filter((n) => n !== null);
+          return bottomLine.every((n) => marked.includes(n!));
+        case 'four_corners':
+          const corners = [];
+          for (let row of [0, 2]) {
+            const rowData = grid[row];
+            const firstNum = rowData.find(n => n !== null);
+            const lastNum = [...rowData].reverse().find(n => n !== null);
+            if (firstNum) corners.push(firstNum);
+            if (lastNum && lastNum !== firstNum) corners.push(lastNum);
+          }
+          return corners.length === 4 && corners.every(n => marked.includes(n));
+        case 'full_house':
+          const allNumbers = grid.flat().filter((n) => n !== null);
+          return allNumbers.every((n) => marked.includes(n!));
+        default:
+          return false;
+      }
+    };
+
+    const completedPatterns = [
+      'early_five', 'top_line', 'middle_line', 'bottom_line', 'four_corners', 'full_house'
+    ].filter(pattern => checkPattern(pattern));
+
     return (
       <View style={styles.ticketCard}>
         <View style={styles.ticketHeader}>
           <Text style={styles.ticketNumber}>
             Ticket #{String(ticket.ticket_number).padStart(4, '0')}
           </Text>
-          <TouchableOpacity
-            style={styles.claimButton}
-            onPress={() => setShowClaimModal(true)}
-          >
-            <MaterialCommunityIcons name="trophy" size={20} color="#FFD700" />
-            <Text style={styles.claimButtonText}>Claim</Text>
-          </TouchableOpacity>
         </View>
+
+        {/* Pattern Status Indicators */}
+        {completedPatterns.length > 0 && (
+          <View style={styles.patternStatus}>
+            <Text style={styles.patternStatusText}>
+              ✅ Completed: {completedPatterns.map(p => p.replace('_', ' ').toUpperCase()).join(', ')}
+            </Text>
+          </View>
+        )}
 
         <View style={styles.ticketGrid}>
           {ticket.grid.map((row, rowIndex) => (
@@ -697,6 +775,14 @@ export default function LiveGameScreen() {
                   <MaterialCommunityIcons name="flag-checkered" size={20} color="#FFF" />
                   <Text style={styles.hostButtonText}>End Game</Text>
                 </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.hostButton, styles.deleteButton]}
+                  onPress={handleDeleteRoom}
+                >
+                  <MaterialCommunityIcons name="delete" size={20} color="#FFF" />
+                  <Text style={styles.hostButtonText}>Delete Room</Text>
+                </TouchableOpacity>
               </View>
             </>
           )}
@@ -733,62 +819,6 @@ export default function LiveGameScreen() {
             </View>
           )}
         </ScrollView>
-
-        {/* Claim Prize Modal */}
-        <Modal
-          visible={showClaimModal}
-          transparent
-          animationType="slide"
-          onRequestClose={() => setShowClaimModal(false)}
-        >
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalContent}>
-              <Text style={styles.modalTitle}>Claim Prize</Text>
-              <Text style={styles.modalSubtitle}>Select the prize you want to claim</Text>
-
-              <ScrollView style={styles.prizeList}>
-                {room.prizes.map((prize) => (
-                  <TouchableOpacity
-                    key={prize.prize_type}
-                    style={[
-                      styles.prizeOption,
-                      checkWin(prize.prize_type) && styles.prizeOptionAvailable,
-                    ]}
-                    onPress={() => handleClaimPrize(prize.prize_type)}
-                    disabled={!checkWin(prize.prize_type)}
-                  >
-                    <MaterialCommunityIcons
-                      name="trophy"
-                      size={24}
-                      color={checkWin(prize.prize_type) ? '#FFD700' : '#999'}
-                    />
-                    <View style={styles.prizeOptionInfo}>
-                      <Text
-                        style={[
-                          styles.prizeOptionName,
-                          !checkWin(prize.prize_type) && styles.prizeOptionDisabled,
-                        ]}
-                      >
-                        {prize.prize_type.replace('_', ' ').toUpperCase()}
-                      </Text>
-                      <Text style={styles.prizeOptionAmount}>₹{prize.amount}</Text>
-                    </View>
-                    {checkWin(prize.prize_type) && (
-                      <MaterialCommunityIcons name="check-circle" size={24} color="#4ECDC4" />
-                    )}
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-
-              <TouchableOpacity
-                style={styles.modalCloseButton}
-                onPress={() => setShowClaimModal(false)}
-              >
-                <Text style={styles.modalCloseButtonText}>Close</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </Modal>
 
         {/* All Tickets Modal */}
         <Modal
@@ -915,32 +945,50 @@ const styles = StyleSheet.create({
   currentNumberContainer: {
     alignItems: 'center',
     marginBottom: 24,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 16,
-    padding: 24,
+    backgroundColor: 'rgba(255, 215, 0, 0.1)',
+    borderRadius: 25,
+    padding: 28,
     borderWidth: 3,
     borderColor: '#FFD700',
+    shadowColor: '#FFD700',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.8,
+    shadowRadius: 16,
+    elevation: 15,
   },
   currentNumberLabel: {
-    fontSize: 14,
-    color: '#FFF',
-    marginBottom: 12,
-    fontWeight: '600',
+    fontSize: 18,
+    color: '#FFD700',
+    marginBottom: 16,
+    fontWeight: 'bold',
+    letterSpacing: 2,
+    textTransform: 'uppercase',
+    textShadowColor: 'rgba(0, 0, 0, 0.3)',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 3,
   },
   currentNumberCircle: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
+    width: 140,
+    height: 140,
+    borderRadius: 70,
     backgroundColor: '#FFD700',
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 4,
+    borderWidth: 6,
     borderColor: '#FFF',
+    shadowColor: '#FFD700',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.6,
+    shadowRadius: 20,
+    elevation: 20,
   },
   currentNumberText: {
-    fontSize: 48,
+    fontSize: 64,
     fontWeight: 'bold',
     color: '#1a5f1a',
+    textShadowColor: 'rgba(0, 0, 0, 0.4)',
+    textShadowOffset: { width: 3, height: 3 },
+    textShadowRadius: 6,
   },
   pausedBadge: {
     flexDirection: 'row',
@@ -1006,6 +1054,9 @@ const styles = StyleSheet.create({
   endButton: {
     backgroundColor: '#FF4444',
   },
+  deleteButton: {
+    backgroundColor: '#DC143C',
+  },
   hostButtonText: {
     fontSize: 14,
     fontWeight: 'bold',
@@ -1043,13 +1094,22 @@ const styles = StyleSheet.create({
   },
   numberCellCurrent: {
     backgroundColor: '#FF6B35',
-    borderWidth: 2,
-    borderColor: '#FFF',
+    borderWidth: 4,
+    borderColor: '#FFD700',
+    shadowColor: '#FFD700',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 15,
+    elevation: 15,
+    transform: [{ scale: 1.15 }],
   },
   numberText: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: 'bold',
     color: '#FFF',
+    textShadowColor: 'rgba(0, 0, 0, 0.5)',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
   },
   numberTextCalled: {
     color: '#FFF',
@@ -1073,19 +1133,17 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#FFD700',
   },
-  claimButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 215, 0, 0.2)',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
-    gap: 4,
+  patternStatus: {
+    backgroundColor: 'rgba(78, 205, 196, 0.1)',
+    padding: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#4ECDC4',
   },
-  claimButtonText: {
-    fontSize: 12,
-    fontWeight: 'bold',
-    color: '#FFD700',
+  patternStatusText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#4ECDC4',
+    textAlign: 'center',
   },
   ticketGrid: {
     padding: 8,
@@ -1109,13 +1167,21 @@ const styles = StyleSheet.create({
   },
   ticketCellCurrent: {
     backgroundColor: '#FF6B35',
-    borderWidth: 2,
-    borderColor: '#FFF',
+    borderWidth: 4,
+    borderColor: '#FFD700',
+    shadowColor: '#FF8C00',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 12,
+    elevation: 12,
   },
   ticketCellText: {
     fontSize: 14,
     fontWeight: 'bold',
     color: '#1a5f1a',
+    textShadowColor: 'rgba(255, 255, 255, 0.3)',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
   },
   ticketCellTextMarked: {
     color: '#FFF',

@@ -55,9 +55,20 @@ export default function LobbyScreen() {
       const filters = filter === 'all' ? {} : { room_type: filter };
       const data = await roomAPI.getRooms(filters);
       setRooms(data);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error loading rooms:', error);
-      Alert.alert('Error', 'Failed to load rooms');
+      
+      // Don't show error alert for server startup/timeout issues
+      if (error.message?.includes('Server is starting up') || 
+          error.message?.includes('timeout') || 
+          error.message?.includes('Network timeout')) {
+        console.log('Server is starting up, will retry automatically...');
+        // Set empty rooms array and let user refresh manually
+        setRooms([]);
+      } else {
+        // Only show alert for actual errors (not server startup)
+        Alert.alert('Error', 'Failed to load rooms. Pull down to refresh.');
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -220,6 +231,9 @@ export default function LobbyScreen() {
             <Text style={styles.headerSubtitle}>Welcome, {user?.name}!</Text>
           </View>
           <View style={styles.headerRight}>
+            {refreshing && (
+              <ActivityIndicator size="small" color="#FFD700" style={{ marginRight: 8 }} />
+            )}
             <TouchableOpacity
               style={styles.adButton}
               onPress={handleWatchAd}
@@ -284,8 +298,12 @@ export default function LobbyScreen() {
           ListEmptyComponent={
             <View style={styles.emptyState}>
               <MaterialCommunityIcons name="inbox" size={80} color="rgba(255,255,255,0.3)" />
-              <Text style={styles.emptyText}>No rooms available</Text>
-              <Text style={styles.emptySubtext}>Create a new room to get started</Text>
+              <Text style={styles.emptyText}>
+                {loading ? 'Loading rooms...' : 'No rooms available'}
+              </Text>
+              <Text style={styles.emptySubtext}>
+                {loading ? 'Server is starting up...' : 'Create a new room to get started or pull down to refresh'}
+              </Text>
             </View>
           }
         />

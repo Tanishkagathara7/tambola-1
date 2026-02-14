@@ -218,6 +218,18 @@ class SocketService {
   }
 
   /**
+   * Delete room (host only)
+   */
+  deleteRoom(roomId: string) {
+    if (!this.socket?.connected) {
+      console.error('Socket not connected');
+      return;
+    }
+
+    this.socket.emit('delete_room', { room_id: roomId });
+  }
+
+  /**
    * Listen to an event
    */
   on(event: string, callback: (data: any) => void) {

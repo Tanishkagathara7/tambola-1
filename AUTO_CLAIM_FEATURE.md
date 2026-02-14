@@ -31,14 +31,14 @@ When a number is called, the system:
 
 ## 💰 Prize Distribution
 
-Prizes are automatically calculated from the prize pool:
+Prizes are automatically calculated from the prize pool (same as offline game):
 
-- **Early Five**: 10% of prize pool
-- **Top Line**: 10% of prize pool
-- **Middle Line**: 10% of prize pool
-- **Bottom Line**: 10% of prize pool
+- **Early Five**: 15% of prize pool
+- **Top Line**: 15% of prize pool
+- **Middle Line**: 15% of prize pool
+- **Bottom Line**: 15% of prize pool
 - **Four Corners**: 10% of prize pool
-- **Full House**: 50% of prize pool
+- **Full House**: 30% of prize pool
 
 **Total**: 100% of prize pool distributed
 
@@ -46,7 +46,9 @@ Prizes are automatically calculated from the prize pool:
 
 ## 🔄 Implementation Details
 
-### Modified File: `backend/socket_handlers.py`
+### Modified Files:
+
+#### Backend: `backend/socket_handlers.py`
 
 #### Key Changes:
 
@@ -63,6 +65,62 @@ Prizes are automatically calculated from the prize pool:
                corners.append(non_none[-1])
        return len(corners) == 4 and all(c in marked for c in corners)
    ```
+
+#### Frontend: `frontend/app/room/game/[id].tsx`
+
+**Key Changes:**
+
+1. **Removed Manual Claim System**
+   - Removed claim modal and all claim buttons
+   - Removed `checkWin()` and `handleClaimPrize()` functions
+   - Replaced with "Auto Claim" badge on tickets
+
+2. **Added Pattern Completion Indicators**
+   ```typescript
+   const checkPattern = (patternType: string): boolean => {
+     // Real-time pattern validation for visual feedback
+     switch (patternType) {
+       case 'early_five':
+         return marked.filter(n => called.includes(n)).length >= 5;
+       case 'top_line':
+         const topLine = grid[0].filter((n) => n !== null);
+         return topLine.every((n) => marked.includes(n!));
+       // ... other patterns
+     }
+   };
+   ```
+
+3. **Enhanced Prize Notifications**
+   ```typescript
+   const handlePrizeClaimed = (data: any) => {
+     if (data.auto_claimed) {
+       Alert.alert('🎉 Auto Prize Won! 🎉', 
+         `${winnerName} automatically won ${prizeDisplayName} - ₹${amount}!`);
+     }
+   };
+   ```
+
+#### Backend: `backend/server_multiplayer.py`
+
+**Key Changes:**
+
+1. **Standard Prize Configuration**
+   ```python
+   def generate_standard_prizes():
+       """Generate standard prize configuration matching offline game"""
+       return [
+           {"prize_type": "early_five", "amount": 15, "percentage": 15},
+           {"prize_type": "top_line", "amount": 15, "percentage": 15},
+           {"prize_type": "middle_line", "amount": 15, "percentage": 15},
+           {"prize_type": "bottom_line", "amount": 15, "percentage": 15},
+           {"prize_type": "four_corners", "amount": 10, "percentage": 10},
+           {"prize_type": "full_house", "amount": 30, "percentage": 30}
+       ]
+   ```
+
+2. **Auto-Apply Standard Prizes**
+   - Rooms automatically get standard prize setup if none provided
+   - Consistent with offline game logic
 
 2. **Enhanced `call_number` event handler**
    - After auto-marking numbers, checks all prize patterns
@@ -168,6 +226,8 @@ Prizes are automatically calculated from the prize pool:
 
 ### Files Modified:
 - `backend/socket_handlers.py` - Auto-claim logic
+- `frontend/app/room/game/[id].tsx` - Removed manual claim UI, added auto-claim indicators
+- `backend/server_multiplayer.py` - Standard prize configuration
 
 ### No Database Migration Required:
 - Uses existing `winners` collection
@@ -176,8 +236,8 @@ Prizes are automatically calculated from the prize pool:
 
 ### Deploy:
 ```bash
-git add backend/socket_handlers.py AUTO_CLAIM_FEATURE.md
-git commit -m "Feature: Auto-claim prizes when patterns complete"
+git add backend/socket_handlers.py backend/server_multiplayer.py frontend/app/room/game/[id].tsx AUTO_CLAIM_FEATURE.md
+git commit -m "Feature: Auto-claim prizes with offline game prize distribution"
 git push
 ```
 

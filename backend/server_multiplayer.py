@@ -411,6 +411,18 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
     )
 
 
+def generate_standard_prizes():
+    """Generate standard prize configuration matching offline game"""
+    return [
+        {"prize_type": "early_five", "amount": 15, "percentage": 15},  # 15% of pool
+        {"prize_type": "top_line", "amount": 15, "percentage": 15},    # 15% of pool
+        {"prize_type": "middle_line", "amount": 15, "percentage": 15}, # 15% of pool
+        {"prize_type": "bottom_line", "amount": 15, "percentage": 15}, # 15% of pool
+        {"prize_type": "four_corners", "amount": 10, "percentage": 10}, # 10% of pool
+        {"prize_type": "full_house", "amount": 30, "percentage": 30}   # 30% of pool
+    ]
+
+
 # ============= ROOM ROUTES =============
 @api_router.get("/rooms", response_model=List[Room])
 async def get_rooms(
@@ -440,21 +452,33 @@ async def create_room(
 ):
     """Create a new game room"""
     
-    # FIX: Convert prize_type strings to enum
-    # Frontend sends strings like "early_five", backend needs PrizeType enum
-    fixed_prizes = []
-    for prize in room_data.prizes:
-        prize_dict = prize.dict() if hasattr(prize, 'dict') else prize
-        
-        # Convert string to enum if needed
-        if isinstance(prize_dict.get('prize_type'), str):
-            try:
-                prize_dict['prize_type'] = PrizeType(prize_dict['prize_type'])
-            except ValueError:
-                # Try uppercase conversion
-                prize_dict['prize_type'] = PrizeType[prize_dict['prize_type'].upper()]
-        
-        fixed_prizes.append(PrizeConfig(**prize_dict))
+    # Use standard prizes if none provided or use provided prizes
+    if not room_data.prizes or len(room_data.prizes) == 0:
+        # Use standard prize configuration
+        standard_prizes = generate_standard_prizes()
+        fixed_prizes = []
+        for prize_data in standard_prizes:
+            fixed_prizes.append(PrizeConfig(
+                prize_type=PrizeType(prize_data["prize_type"]),
+                amount=prize_data["amount"],
+                multiple_winners=False
+            ))
+    else:
+        # FIX: Convert prize_type strings to enum
+        # Frontend sends strings like "early_five", backend needs PrizeType enum
+        fixed_prizes = []
+        for prize in room_data.prizes:
+            prize_dict = prize.dict() if hasattr(prize, 'dict') else prize
+            
+            # Convert string to enum if needed
+            if isinstance(prize_dict.get('prize_type'), str):
+                try:
+                    prize_dict['prize_type'] = PrizeType(prize_dict['prize_type'])
+                except ValueError:
+                    # Try uppercase conversion
+                    prize_dict['prize_type'] = PrizeType[prize_dict['prize_type'].upper()]
+            
+            fixed_prizes.append(PrizeConfig(**prize_dict))
     
     room = Room(
         name=room_data.name,
@@ -492,6 +516,58 @@ async def get_room(
     # Serialize to remove ObjectId
     serialized_room = serialize_doc(room)
     return Room(**serialized_room)
+
+
+@api_router.delete("/rooms/{room_id}", response_model=MessageResponse)
+async def delete_room(
+    room_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Delete a room (host only)"""
+    room = await db.rooms.find_one({"id": room_id})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    
+    # Check if user is the host
+    if room["host_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only host can delete the room")
+    
+    # Check if game is active - prevent deletion during active game
+    if room.get("status") == RoomStatus.ACTIVE:
+        raise HTTPException(
+            status_code=400, 
+            detail="Cannot delete room while game is active. Please end the game first."
+        )
+    
+    # Delete associated data
+    # 1. Delete all tickets for this room
+    tickets_result = await db.tickets.delete_many({"room_id": room_id})
+    
+    # 2. Delete all winners for this room
+    winners_result = await db.winners.delete_many({"room_id": room_id})
+    
+    # 3. Delete all transactions related to this room (optional - keep for audit trail)
+    # transactions_result = await db.transactions.delete_many({"room_id": room_id})
+    
+    # 4. Delete the room itself
+    await db.rooms.delete_one({"id": room_id})
+    
+    # Broadcast room deletion to all connected clients
+    await sio.emit('room_deleted', {
+        "room_id": room_id,
+        "deleted_by": current_user["id"]
+    })
+    
+    logger.info(f"Room {room_id} deleted by host {current_user['id']} - {tickets_result.deleted_count} tickets, {winners_result.deleted_count} winners removed")
+    
+    return MessageResponse(
+        message="Room deleted successfully",
+        data={
+            "room_id": room_id,
+            "tickets_deleted": tickets_result.deleted_count,
+            "winners_deleted": winners_result.deleted_count
+        }
+    )
 
 
 @api_router.get("/rooms/{room_id}/tickets", response_model=List[Ticket])

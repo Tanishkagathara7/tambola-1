@@ -23,6 +23,46 @@ function safeParseResponseBody(text: string): any {
   }
 }
 
+/** Retry API calls with exponential backoff for Render cold starts */
+const retryApiFetch = async (endpoint: string, options: RequestInit = {}, maxRetries: number = 2) => {
+  let lastError;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await apiFetch(endpoint, options);
+      return result;
+    } catch (error: any) {
+      lastError = error;
+      
+      // Don't retry on auth errors or client errors
+      if (error.message === 'Unauthorized' || error.message.includes('400')) {
+        throw error;
+      }
+      
+      // If this is the last attempt, throw the error
+      if (attempt === maxRetries) {
+        // For room loading, return empty array instead of throwing
+        if (endpoint === '/rooms' || endpoint.includes('/rooms')) {
+          console.log('Failed to load rooms after retries, returning empty array');
+          return [];
+        }
+        if (endpoint.includes('/tickets/my-tickets/')) {
+          console.log('Failed to load tickets after retries, returning empty array');
+          return [];
+        }
+        throw error;
+      }
+      
+      // Wait before retrying (exponential backoff)
+      const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+      console.log(`API call failed, retrying in ${delay}ms... (attempt ${attempt + 1}/${maxRetries + 1})`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  throw lastError;
+};
+
 // safeFetch: never throws on plain "Internal Server Error"; uses text() only (no response.json()).
 const apiFetch = async (endpoint: string, options: RequestInit = {}) => {
   const token = await AsyncStorage.getItem('auth_token');
@@ -37,7 +77,8 @@ const apiFetch = async (endpoint: string, options: RequestInit = {}) => {
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  // Increased timeout for Render cold starts (60 seconds)
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
 
   try {
     const response = await fetch(`${API_URL}${endpoint}`, {
@@ -73,7 +114,16 @@ const apiFetch = async (endpoint: string, options: RequestInit = {}) => {
     return data;
   } catch (error: any) {
     if (error.name === 'AbortError') {
-      throw new Error('Network timeout. Server took too long to respond.');
+      // For Render cold starts, return empty array instead of throwing error
+      console.log('Server is starting up (cold start), returning empty data...');
+      if (endpoint === '/rooms' || endpoint.includes('/rooms')) {
+        return []; // Return empty rooms array
+      }
+      if (endpoint.includes('/tickets/my-tickets/')) {
+        return []; // Return empty tickets array
+      }
+      // For other endpoints, still throw the error
+      throw new Error('Server is starting up, please try again in a moment.');
     }
     throw error;
   }
@@ -123,11 +173,11 @@ export const roomAPI = {
     status?: string;
   }) => {
     const params = new URLSearchParams(filters as any).toString();
-    return apiFetch(`/rooms${params ? `?${params}` : ''}`);
+    return retryApiFetch(`/rooms${params ? `?${params}` : ''}`, {}, 3); // 3 retries for room loading
   },
 
   getCompleted: async () => {
-    return apiFetch('/rooms/completed/history');
+    return retryApiFetch('/rooms/completed/history', {}, 2);
   },
 
   createRoom: async (data: {
@@ -151,7 +201,7 @@ export const roomAPI = {
   },
 
   getRoom: async (roomId: string) => {
-    return apiFetch(`/rooms/${roomId}`);
+    return retryApiFetch(`/rooms/${roomId}`, {}, 2);
   },
 
   /** Get all tickets in a room (host only) - for admin winner selection */
@@ -190,7 +240,7 @@ export const ticketAPI = {
   },
 
   getMyTickets: async (roomId: string) => {
-    return apiFetch(`/tickets/my-tickets/${roomId}`);
+    return retryApiFetch(`/tickets/my-tickets/${roomId}`, {}, 2); // Retry for ticket loading
   },
 };
 
