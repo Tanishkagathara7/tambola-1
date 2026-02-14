@@ -1,17 +1,21 @@
 """
-Socket.IO Event Handlers for Real-time Gameplay
+Socket.IO Event Handlers for Real-time Gameplay.
+Uses points only; auto-mark and auto-claim on number call; room closes on full house.
 """
+import random
 import socketio
-from typing import Dict, Any
+import uuid
 import logging
 from datetime import datetime
+from typing import Dict, Any
 from bson import ObjectId
-import uuid
+
+from models import PrizeType
+from game_services import credit_points, compute_prize_distribution
 
 logger = logging.getLogger(__name__)
 
-# Store active connections
-active_connections: Dict[str, str] = {}  # sid -> user_id++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+active_connections: Dict[str, str] = {}  # sid -> user_id
 user_rooms: Dict[str, str] = {}  # user_id -> room_id
 
 
@@ -54,44 +58,49 @@ def serialize_doc(doc: Any) -> Any:
     return doc
 
 
+async def _build_leaderboard(db, room_id):
+    """Build leaderboard list for room: [{ user_id, user_name, total_won, prizes }]."""
+    winners = await db.winners.find({"room_id": room_id}).to_list(1000)
+    by_user = {}
+    for w in winners:
+        uid = w.get("user_id")
+        if not uid:
+            continue
+        if uid not in by_user:
+            by_user[uid] = {"user_id": uid, "user_name": w.get("user_name", ""), "total_won": 0.0, "prizes": []}
+        amt = float(w.get("amount") or 0)
+        by_user[uid]["total_won"] += amt
+        by_user[uid]["prizes"].append({"prize_type": w.get("prize_type"), "amount": amt})
+    return sorted(by_user.values(), key=lambda x: -x["total_won"])
+
+
 async def handle_game_completion(sio, db, room_id):
-    """Handle graceful game completion with winners and rankings"""
+    """Set room COMPLETED, increment total_games for players, emit game_completed and leaderboard."""
     try:
-        # Update room status
+        room = await db.rooms.find_one({"id": room_id})
+        if not room:
+            return
         await db.rooms.update_one(
             {"id": room_id},
-            {"$set": {"status": "completed", "completed_at": datetime.utcnow()}}
+            {"$set": {"status": "completed", "completed_at": datetime.utcnow()}},
         )
-        
-        # Get winners and rankings
         winners = await db.winners.find({"room_id": room_id}).to_list(1000)
-        prize_order = {
-            'early_five': 1,
-            'top_line': 2,
-            'middle_line': 3,
-            'bottom_line': 4,
-            'four_corners': 5,
-            'full_house': 6
-        }
-        sorted_winners = sorted(winners, key=lambda w: (
-            prize_order.get(w['prize_type'], 999),
-            w.get('claimed_at', datetime.utcnow())
-        ))
-        
+        prize_order = {"early_five": 1, "top_line": 2, "middle_line": 3, "bottom_line": 4, "four_corners": 5, "full_house": 6}
+        sorted_winners = sorted(winners, key=lambda w: (prize_order.get(w.get("prize_type"), 999), w.get("claimed_at", datetime.utcnow())))
         serialized_winners = [serialize_doc(w) for w in sorted_winners]
-        
-        # Distribute remaining pool to Full House if needed (simplified logic for now)
-        # In a real scenario, we'd calculate exact shares here.
-        # For this requirement, we trust the points added during 'claim_prize' or 'end_game'
-        
-        # Emit game_completed event (not game_ended)
-        await sio.emit('game_completed', {
-            'room_id': room_id,
-            'winners': serialized_winners,
-            'completed_at': str(datetime.utcnow()),
-            'prize_pool': (await db.rooms.find_one({"id": room_id})).get("prize_pool", 0)
+        leaderboard = await _build_leaderboard(db, room_id)
+        await sio.emit("game_completed", {
+            "room_id": room_id,
+            "winners": serialized_winners,
+            "completed_at": datetime.utcnow().isoformat(),
+            "prize_pool": room.get("prize_pool", 0),
+            "leaderboard": leaderboard,
         }, room=room_id)
-        
+        await sio.emit("leaderboard_updated", {"room_id": room_id, "leaderboard": leaderboard}, room=room_id)
+        for w in winners:
+            uid = w.get("user_id")
+            if uid:
+                await db.users.update_one({"id": uid}, {"$inc": {"total_games": 1}})
         logger.info(f"Game completed in room {room_id} with {len(winners)} winners")
     except Exception as e:
         logger.error(f"Game completion error: {e}")
@@ -163,53 +172,36 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
             await sio.enter_room(sid, room_id)
             user_rooms[user_id] = room_id
             
-            # Get room data
             room = await db.rooms.find_one({"id": room_id})
             if room:
-                # Check for mid-game join
-                if room.get("status") == "active":
-                    # Emit game_state_sync
-                    await sio.emit('game_state_sync', {
+                room_status = (room.get("status") or "").lower()
+                if room_status == "active":
+                    await sio.emit("game_state_sync", {
                         "room_id": room_id,
                         "called_numbers": room.get("called_numbers", []),
                         "current_number": room.get("current_number"),
-                        "last_called_at": str(datetime.utcnow()) # Approximate or add field to room
                     }, room=sid)
 
-                # AUTO GENERATE ONE FREE TICKET FOR PLAYER
-                # Check if player already has a ticket in this room
-                existing_ticket = await db.tickets.find_one({
-                    "room_id": room_id,
-                    "user_id": user_id
-                })
-                
-                if not existing_ticket:
-                    # Generate ticket number based on existing tickets count
+                # Only auto-create ticket when room is waiting (not mid-game join)
+                existing_ticket = await db.tickets.find_one({"room_id": room_id, "user_id": user_id})
+                if not existing_ticket and room_status == "waiting":
+                    from server_multiplayer import generate_tambola_ticket
                     ticket_count = await db.tickets.count_documents({"room_id": room_id})
                     ticket_number = ticket_count + 1
-                    
-                    # Import generate function from server_multiplayer
-                    from server_multiplayer import generate_tambola_ticket
-                    
-                    # Generate ticket grid
                     ticket_grid = generate_tambola_ticket(ticket_number)
-                    
-                    # Create ticket document
-                    ticket_id = str(uuid.uuid4())
                     new_ticket = {
-                        "id": ticket_id,
+                        "id": str(uuid.uuid4()),
                         "room_id": room_id,
                         "user_id": user_id,
                         "ticket_number": ticket_number,
-                        "grid": ticket_grid,
-                        "marked_numbers": [],  # Empty array for marking
-                        "created_at": datetime.utcnow()
+                        "grid": ticket_grid.get("grid"),
+                        "numbers": ticket_grid.get("numbers", []),
+                        "marked_numbers": [],
+                        "created_at": datetime.utcnow(),
                     }
-                    
                     await db.tickets.insert_one(new_ticket)
-                    logger.info(f"Auto-generated ticket {ticket_id} for user {user_id} in room {room_id}")
-                
-                # Serialize room data to remove ObjectId
+                    logger.info(f"Auto-generated ticket for user {user_id} in room {room_id}")
+
                 serialized_room = serialize_doc(room)
                 
                 await sio.emit('room_joined', {
@@ -254,410 +246,209 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
     
     @sio.event
     async def call_number(sid, data):
-        """Call a number in the game"""
+        """Call a number: update room, auto-mark all tickets, auto-claim prizes. On full house, complete game."""
         try:
-            room_id = data.get('room_id')
-            number = data.get('number')
+            from server_multiplayer import validate_win
+            room_id = data.get("room_id")
+            number = data.get("number")
             user_id = active_connections.get(sid)
-            
-            # Get room
             room = await db.rooms.find_one({"id": room_id})
             if not room:
-                await sio.emit('error', {'message': 'Room not found'}, room=sid)
+                await sio.emit("error", {"message": "Room not found"}, room=sid)
                 return
-            
-            # Check if user is host
-            if room['host_id'] != user_id:
-                await sio.emit('error', {'message': 'Only host can call numbers'}, room=sid)
+            if room["host_id"] != user_id:
+                await sio.emit("error", {"message": "Only host can call numbers"}, room=sid)
                 return
-            
-            # Generate or validate number
-            called_numbers = room.get('called_numbers', [])
-            
+            if (room.get("status") or "").lower() != "active":
+                await sio.emit("error", {"message": "Game not active"}, room=sid)
+                return
+
+            called_numbers = list(room.get("called_numbers", []))
             if number is None:
-                # Auto-generate
                 available = [n for n in range(1, 91) if n not in called_numbers]
                 if not available:
-                    # GRACEFUL GAME COMPLETION - NO ERROR
-                    # Calculate winners and end game
                     await handle_game_completion(sio, db, room_id)
                     return
-                import random
                 number = random.choice(available)
             else:
-                # Validate
                 if number in called_numbers:
-                    await sio.emit('error', {'message': 'Number already called'}, room=sid)
+                    await sio.emit("error", {"message": "Number already called"}, room=sid)
                     return
                 if number < 1 or number > 90:
-                    await sio.emit('error', {'message': 'Invalid number'}, room=sid)
+                    await sio.emit("error", {"message": "Invalid number"}, room=sid)
                     return
-            
-            # Update room
+
             called_numbers.append(number)
             await db.rooms.update_one(
                 {"id": room_id},
-                {
-                    "$set": {
-                        "current_number": number,
-                        "called_numbers": called_numbers
-                    }
-                }
+                {"$set": {"current_number": number, "called_numbers": called_numbers}},
             )
-            
-            # AUTO-MARK ALL TICKETS IN THE ROOM AND AUTO-CLAIM PRIZES
-            # Get all tickets for this room
+
+            prize_dist = room.get("prize_distribution")
+            if not prize_dist and room.get("prize_pool"):
+                prize_dist = compute_prize_distribution(room["prize_pool"])
+            if not prize_dist:
+                prize_dist = {}
+
             tickets = await db.tickets.find({"room_id": room_id}).to_list(1000)
-            
-            # Get room data for prize pool
-            room_doc = await db.rooms.find_one({"id": room_id})
-            prize_pool = room_doc.get("prize_pool", 0)
-            
+            full_house_won = False
+
             for ticket in tickets:
-                # Check if number exists in ticket grid
-                number_found = False
-                grid = ticket.get('grid', [])
-                
-                # Ensure grid is a list
-                if not isinstance(grid, list):
-                    logger.warning(f"Invalid grid format for ticket {ticket.get('id')}")
+                grid = ticket.get("grid") or []
+                if not isinstance(grid, list) or len(grid) != 3:
                     continue
-                
-                for row in grid:
-                    # Ensure row is a list
-                    if not isinstance(row, list):
-                        continue
-                    
-                    # Check if number is in this row
-                    if number in row:
-                        number_found = True
-                        break
-                
-                if number_found:
-                    # Add number to marked_numbers if not already there
-                    marked = ticket.get('marked_numbers', [])
-                    
-                    # Ensure marked is a list
-                    if not isinstance(marked, list):
-                        marked = []
-                    
+                numbers_in_ticket = ticket.get("numbers")
+                if not numbers_in_ticket and grid:
+                    numbers_in_ticket = [n for row in grid for n in (row or []) if n is not None]
+                ticket["numbers"] = numbers_in_ticket or []
+
+                marked = list(ticket.get("marked_numbers") or [])
+                if number in (ticket["numbers"] or []):
                     if number not in marked:
                         marked.append(number)
-                        
-                        # Update ticket in database
-                        await db.tickets.update_one(
-                            {"id": ticket['id']},
-                            {"$set": {"marked_numbers": marked}}
-                        )
-                        
-                        # Update the ticket object for pattern checking
-                        ticket['marked_numbers'] = marked
-                        
-                        # Emit ticket_updated event to the specific user
-                        serialized_ticket = serialize_doc(ticket)
-                        serialized_ticket['marked_numbers'] = marked
-                        
-                        await sio.emit('ticket_updated', {
-                            'ticket': serialized_ticket,
-                            'number': number
+                        await db.tickets.update_one({"id": ticket["id"]}, {"$set": {"marked_numbers": marked}})
+                        ticket["marked_numbers"] = marked
+                        await sio.emit("ticket_updated", {
+                            "ticket_id": ticket["id"],
+                            "marked_numbers": marked,
+                            "last_called_number": number,
                         }, room=room_id)
-                
-                # AUTO-CLAIM PRIZES: Check if any prize pattern is complete
-                marked = ticket.get('marked_numbers', [])
-                if not isinstance(marked, list):
-                    marked = []
-                
-                logger.info(f"Checking patterns for ticket {ticket.get('id')} - marked: {len(marked)} numbers")
-                
-                # Define prize types to check in order
-                def check_early_five():
-                    # Early five: first 5 called numbers that match this ticket
-                    ticket_numbers = [n for row in grid for n in row if n is not None]
-                    matching_called = [n for n in called_numbers if n in ticket_numbers]
-                    result = len(matching_called) >= 5
-                    logger.info(f"Early five check: {len(matching_called)}/5 matching called numbers - {result}")
-                    return result
-                
-                def check_top_line():
-                    top_row_numbers = [n for n in grid[0] if n is not None]
-                    result = len(top_row_numbers) > 0 and all(n in marked for n in top_row_numbers)
-                    logger.info(f"Top line check: {top_row_numbers} - all marked: {result}")
-                    return result
-                
-                def check_middle_line():
-                    middle_row_numbers = [n for n in grid[1] if n is not None]
-                    result = len(middle_row_numbers) > 0 and all(n in marked for n in middle_row_numbers)
-                    logger.info(f"Middle line check: {middle_row_numbers} - all marked: {result}")
-                    return result
-                
-                def check_bottom_line():
-                    bottom_row_numbers = [n for n in grid[2] if n is not None]
-                    result = len(bottom_row_numbers) > 0 and all(n in marked for n in bottom_row_numbers)
-                    logger.info(f"Bottom line check: {bottom_row_numbers} - all marked: {result}")
-                    return result
-                
-                def check_full_house():
-                    all_numbers = [n for row in grid for n in row if n is not None]
-                    result = len(all_numbers) > 0 and all(n in marked for n in all_numbers)
-                    logger.info(f"Full house check: {len(all_numbers)} total numbers - all marked: {result}")
-                    return result
-                
-                prize_checks = [
-                    ('early_five', check_early_five),
-                    ('top_line', check_top_line),
-                    ('middle_line', check_middle_line),
-                    ('bottom_line', check_bottom_line),
-                    ('four_corners', lambda: check_four_corners(grid, marked)),
-                    ('full_house', check_full_house)
+
+                prize_types_order = [
+                    PrizeType.EARLY_FIVE,
+                    PrizeType.TOP_LINE,
+                    PrizeType.MIDDLE_LINE,
+                    PrizeType.BOTTOM_LINE,
+                    PrizeType.FOUR_CORNERS,
+                    PrizeType.FULL_HOUSE,
                 ]
-                
-                for prize_type, check_func in prize_checks:
-                    # Check if prize already claimed
-                    existing_winner = await db.winners.find_one({
+                for pt in prize_types_order:
+                    pt_str = pt.value
+                    existing = await db.winners.find_one({"room_id": room_id, "prize_type": pt_str})
+                    if existing:
+                        continue
+                    if not validate_win(ticket, called_numbers, pt):
+                        continue
+                    amount = float(prize_dist.get(pt_str, 0) or 0)
+                    if amount <= 0:
+                        amount = 10.0
+                    winner_doc = {
+                        "id": str(uuid.uuid4()),
                         "room_id": room_id,
-                        "prize_type": prize_type
-                    })
-                    
-                    if existing_winner:
-                        continue  # Prize already claimed
-                    
-                    # Check if pattern is complete
+                        "user_id": ticket["user_id"],
+                        "user_name": ticket.get("user_name", ""),
+                        "ticket_id": ticket["id"],
+                        "ticket_number": ticket.get("ticket_number", 0),
+                        "prize_type": pt_str,
+                        "amount": amount,
+                        "claimed_at": datetime.utcnow(),
+                        "auto_claimed": True,
+                    }
+                    await db.winners.insert_one(winner_doc)
                     try:
-                        if check_func():
-                            logger.info(f"AUTO-CLAIMING: Prize {prize_type} for ticket {ticket.get('id')} in room {room_id}")
-                            
-                            # AUTO-CLAIM THIS PRIZE
-                            winner_id = str(uuid.uuid4())
-                            ticket_user_id = ticket.get('user_id')
-                            
-                            # Calculate winning points based on standard percentages
-                            winning_points = 0
-                            if prize_pool > 0:
-                                # Standard prize distribution percentages (same as offline)
-                                if prize_type == 'early_five': 
-                                    winning_points = prize_pool * 0.15  # 15% for Early Five
-                                elif prize_type == 'top_line': 
-                                    winning_points = prize_pool * 0.15  # 15% for Top Line
-                                elif prize_type == 'middle_line': 
-                                    winning_points = prize_pool * 0.15  # 15% for Middle Line
-                                elif prize_type == 'bottom_line': 
-                                    winning_points = prize_pool * 0.15  # 15% for Bottom Line
-                                elif prize_type == 'four_corners': 
-                                    winning_points = prize_pool * 0.10  # 10% for Four Corners
-                                elif prize_type == 'full_house': 
-                                    winning_points = prize_pool * 0.30  # 30% for Full House
-                            else:
-                                # Fallback to configured amount if pool is 0
-                                for p in room_doc.get("prizes", []):
-                                    if p.get('prize_type') == prize_type:
-                                        winning_points = p.get('amount', 10)
-                                        break
-                                if winning_points == 0:
-                                    winning_points = 10  # Default fallback
-                            
-                            # Create winner record
-                            winner = {
-                                "id": winner_id,
-                                "room_id": room_id,
-                                "user_id": ticket_user_id,
-                                "ticket_id": ticket.get('id'),
-                                "ticket_number": ticket.get('ticket_number'),
-                                "prize_type": prize_type,
-                                "amount": winning_points,
-                                "claimed_at": datetime.utcnow(),
-                                "auto_claimed": True
-                            }
-                            
-                            await db.winners.insert_one(winner)
-                            
-                            # Credit points to user
-                            await db.users.update_one(
-                                {"id": ticket_user_id},
-                                {"$inc": {
-                                    "points_balance": winning_points, 
-                                    "total_winnings": winning_points, 
-                                    "total_wins": 1
-                                }}
-                            )
-                            
-                            # Get user info for broadcast
-                            winner_user = await db.users.find_one({"id": ticket_user_id})
-                            winner_name = winner_user.get('name', 'Unknown') if winner_user else 'Unknown'
-                            
-                            # Broadcast prize claimed to ALL players
-                            serialized_winner = serialize_doc(winner)
-                            serialized_winner['user_name'] = winner_name
-                            
-                            await sio.emit('prize_claimed', serialized_winner, room=room_id)
-                            
-                            logger.info(f"AUTO-CLAIMED: Prize {prize_type} for user {ticket_user_id} in room {room_id} - {winning_points} points")
-                    
-                    except Exception as e:
-                        logger.error(f"Error checking prize {prize_type}: {e}")
-            
-            # Check if all numbers have been called
-            game_complete = len(called_numbers) >= 90
-            
-            # Broadcast to all players in room
-            await sio.emit('number_called', {
-                'number': number,
-                'called_numbers': called_numbers,
-                'remaining': 90 - len(called_numbers),
-                'game_complete': game_complete
+                        await credit_points(
+                            db,
+                            ticket["user_id"],
+                            amount,
+                            f"Won {pt_str} in room {room_id}",
+                            room_id=room_id,
+                            ticket_id=ticket["id"],
+                        )
+                    except ValueError:
+                        pass
+                    await db.users.update_one(
+                        {"id": ticket["user_id"]},
+                        {"$inc": {"total_wins": 1, "total_winnings": amount}},
+                    )
+                    await db.rooms.update_one({"id": room_id}, {"$push": {"winners": winner_doc}})
+                    serialized = serialize_doc(winner_doc)
+                    await sio.emit("prize_won", {"winner": serialized, "room_id": room_id}, room=room_id)
+                    leaderboard = await _build_leaderboard(db, room_id)
+                    await sio.emit("leaderboard_updated", {"room_id": room_id, "leaderboard": leaderboard}, room=room_id)
+                    if pt == PrizeType.FULL_HOUSE:
+                        full_house_won = True
+                    logger.info(f"AUTO-CLAIMED {pt_str} for user {ticket['user_id']} in room {room_id}")
+
+            await sio.emit("number_called", {
+                "number": number,
+                "called_numbers": called_numbers,
+                "remaining": 90 - len(called_numbers),
+                "game_complete": len(called_numbers) >= 90,
             }, room=room_id)
-            
-            # If game complete, trigger end game
-            if game_complete:
+
+            if full_house_won or len(called_numbers) >= 90:
                 await handle_game_completion(sio, db, room_id)
-            
+
             logger.info(f"Number {number} called in room {room_id}")
-        
         except Exception as e:
             logger.error(f"Call number error: {e}")
-            await sio.emit('error', {'message': str(e)}, room=sid)
+            await sio.emit("error", {"message": str(e)}, room=sid)
 
     
     @sio.event
     async def claim_prize(sid, data):
-        """Claim a prize with validation"""
+        """Optional manual claim. Uses room prize_distribution and credit_points."""
         try:
-            room_id = data.get('room_id')
-            ticket_id = data.get('ticket_id')
-            prize_type = data.get('prize_type')
+            from server_multiplayer import validate_win
+            room_id = data.get("room_id")
+            ticket_id = data.get("ticket_id")
+            prize_type = data.get("prize_type")
             user_id = active_connections.get(sid)
-            
-            # Get ticket
             ticket = await db.tickets.find_one({"id": ticket_id})
             if not ticket:
-                await sio.emit('error', {'message': 'Ticket not found'}, room=sid)
+                await sio.emit("error", {"message": "Ticket not found"}, room=sid)
                 return
-            
-            # Check if prize already claimed
-            existing_winner = await db.winners.find_one({
-                "room_id": room_id,
-                "prize_type": prize_type
-            })
-            
+            if ticket.get("user_id") != user_id:
+                await sio.emit("error", {"message": "Not your ticket"}, room=sid)
+                return
+            existing_winner = await db.winners.find_one({"room_id": room_id, "prize_type": prize_type})
             if existing_winner:
-                await sio.emit('error', {'message': f'{prize_type} already claimed'}, room=sid)
+                await sio.emit("error", {"message": f"{prize_type} already claimed"}, room=sid)
                 return
-            
-            # Validate win based on prize type
-            grid = ticket.get('grid', [])
-            marked = ticket.get('marked_numbers', [])
-            is_valid = False
-            
-            # Get room to access called numbers for early five validation
             room_doc = await db.rooms.find_one({"id": room_id})
-            called_numbers = room_doc.get('called_numbers', []) if room_doc else []
-            
-            if prize_type == 'early_five':
-                # Early five: first 5 called numbers that match this ticket
-                ticket_numbers = [n for row in grid for n in row if n is not None]
-                matching_called = [n for n in called_numbers if n in ticket_numbers]
-                is_valid = len(matching_called) >= 5
-            
-            elif prize_type == 'top_line':
-                # All numbers in top row marked
-                top_row = [n for n in grid[0] if n is not None]
-                is_valid = len(top_row) > 0 and all(n in marked for n in top_row)
-            
-            elif prize_type == 'middle_line':
-                # All numbers in middle row marked
-                middle_row = [n for n in grid[1] if n is not None]
-                is_valid = len(middle_row) > 0 and all(n in marked for n in middle_row)
-            
-            elif prize_type == 'bottom_line':
-                # All numbers in bottom row marked
-                bottom_row = [n for n in grid[2] if n is not None]
-                is_valid = len(bottom_row) > 0 and all(n in marked for n in bottom_row)
-            
-            elif prize_type == 'four_corners':
-                # Four corners marked
-                is_valid = check_four_corners(grid, marked)
-            
-            elif prize_type == 'full_house':
-                # All numbers in ticket marked
-                all_numbers = [n for row in grid for n in row if n is not None]
-                is_valid = len(all_numbers) > 0 and all(n in marked for n in all_numbers)
-            
-            if not is_valid:
-                await sio.emit('error', {'message': 'Invalid claim - pattern not complete'}, room=sid)
+            called_numbers = room_doc.get("called_numbers", []) if room_doc else []
+            pt_enum = getattr(PrizeType, prize_type.upper(), None) if isinstance(prize_type, str) else prize_type
+            if pt_enum is None:
+                try:
+                    pt_enum = PrizeType(prize_type)
+                except (ValueError, KeyError):
+                    await sio.emit("error", {"message": "Invalid prize type"}, room=sid)
+                    return
+            if not validate_win(ticket, called_numbers, pt_enum):
+                await sio.emit("error", {"message": "Invalid claim - pattern not complete"}, room=sid)
                 return
-            
-            # Save winner
-            winner_id = str(uuid.uuid4())
-            winner = {
-                "id": winner_id,
+            dist = room_doc.get("prize_distribution") or {}
+            amount = float(dist.get(prize_type, 0) or 0)
+            if amount <= 0:
+                amount = 10.0
+            user_doc = await db.users.find_one({"id": user_id})
+            winner_doc = {
+                "id": str(uuid.uuid4()),
                 "room_id": room_id,
                 "user_id": user_id,
+                "user_name": (user_doc or {}).get("name", ""),
                 "ticket_id": ticket_id,
+                "ticket_number": ticket.get("ticket_number", 0),
                 "prize_type": prize_type,
-                "claimed_at": datetime.utcnow()
+                "amount": amount,
+                "claimed_at": datetime.utcnow(),
             }
-            
-            await db.winners.insert_one(winner)
-            
-            # Get room data for prize pool calculation
-            room_doc = await db.rooms.find_one({"id": room_id})
-            prize_pool = room_doc.get("prize_pool", 0)
-            
-            # Calculate winning points based on standard percentages (same as offline)
-            winning_points = 0
-            if prize_pool > 0:
-                # Standard prize distribution percentages
-                if prize_type == 'early_five': 
-                    winning_points = prize_pool * 0.15  # 15% for Early Five
-                elif prize_type == 'top_line': 
-                    winning_points = prize_pool * 0.15  # 15% for Top Line
-                elif prize_type == 'middle_line': 
-                    winning_points = prize_pool * 0.15  # 15% for Middle Line
-                elif prize_type == 'bottom_line': 
-                    winning_points = prize_pool * 0.15  # 15% for Bottom Line
-                elif prize_type == 'four_corners': 
-                    winning_points = prize_pool * 0.10  # 10% for Four Corners
-                elif prize_type == 'full_house': 
-                    winning_points = prize_pool * 0.30  # 30% for Full House
-                else: 
-                    winning_points = 10  # Default fallback
-            else:
-                 # Fallback to configured amount if pool is 0 (e.g. testing)
-                 for p in room_doc.get("prizes", []):
-                     if p['prize_type'] == prize_type:
-                         winning_points = p['amount']
-                         break
-                 if winning_points == 0:
-                     winning_points = 10  # Default fallback
-
-            # Update winner record with actual amount
-            await db.winners.update_one(
-                {"id": winner_id},
-                {"$set": {"amount": winning_points}}
-            )
-
-            # Credit points to user
-            await db.users.update_one(
-                {"id": user_id},
-                {"$inc": {"points_balance": winning_points, "total_winnings": winning_points, "total_wins": 1}}
-            )
-            
-            # Get updated balance
-            updated_user = await db.users.find_one({"id": user_id})
-            new_balance = updated_user.get("points_balance", 0)
-
-            # Emit points_updated to the WINNER only
-            await sio.emit('points_updated', {
-                'balance': new_balance,
-                'message': f"You won {winning_points} points for {prize_type}!"
-            }, room=sid)
-
-            # Broadcast prize claimed to ALL
-            serialized_winner['amount'] = winning_points 
-            await sio.emit('prize_claimed', serialized_winner, room=room_id)
-        
+            await db.winners.insert_one(winner_doc)
+            try:
+                new_balance = await credit_points(db, user_id, amount, f"Won {prize_type} in room {room_id}", room_id=room_id, ticket_id=ticket_id)
+            except ValueError:
+                u = await db.users.find_one({"id": user_id})
+                new_balance = u.get("points_balance", 0) + amount
+            await db.users.update_one({"id": user_id}, {"$inc": {"total_wins": 1, "total_winnings": amount}})
+            await db.rooms.update_one({"id": room_id}, {"$push": {"winners": winner_doc}})
+            serialized = serialize_doc(winner_doc)
+            await sio.emit("points_updated", {"points_balance": new_balance, "message": f"You won {amount} points for {prize_type}!"}, room=sid)
+            await sio.emit("prize_won", {"winner": serialized, "room_id": room_id}, room=room_id)
+            leaderboard = await _build_leaderboard(db, room_id)
+            await sio.emit("leaderboard_updated", {"room_id": room_id, "leaderboard": leaderboard}, room=room_id)
         except Exception as e:
             logger.error(f"Claim prize error: {e}")
-            await sio.emit('error', {'message': str(e)}, room=sid)
+            await sio.emit("error", {"message": str(e)}, room=sid)
     
     @sio.event
     async def chat_message(sid, data):
@@ -688,55 +479,54 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
     
     @sio.event
     async def start_game(sid, data):
-        """Start the game"""
+        """Start the game: set status active, compute prize_pool and prize_distribution if not set."""
         try:
-            room_id = data.get('room_id')
+            room_id = data.get("room_id")
             user_id = active_connections.get(sid)
-            
-            # Get room
             room = await db.rooms.find_one({"id": room_id})
             if not room:
+                await sio.emit("error", {"message": "Room not found"}, room=sid)
                 return
-            
-            # Check if user is host
-            if room['host_id'] != user_id:
-                await sio.emit('error', {'message': 'Only host can start game'}, room=sid)
+            if room["host_id"] != user_id:
+                await sio.emit("error", {"message": "Only host can start game"}, room=sid)
                 return
-            
-            # Check if players have tickets
             tickets_count = await db.tickets.count_documents({"room_id": room_id})
             if tickets_count == 0:
-                await sio.emit('error', {'message': 'No tickets purchased yet'}, room=sid)
+                await sio.emit("error", {"message": "No tickets purchased yet"}, room=sid)
                 return
-            
-            # Update room status
+            ticket_price = room.get("ticket_price", 0)
+            tickets_sold = room.get("tickets_sold", 0) or tickets_count
+            prize_pool = room.get("prize_pool")
+            if prize_pool is None or prize_pool <= 0:
+                prize_pool = tickets_sold * ticket_price
+            prize_dist = room.get("prize_distribution")
+            if not prize_dist:
+                prize_dist = compute_prize_distribution(prize_pool)
             await db.rooms.update_one(
                 {"id": room_id},
                 {
                     "$set": {
                         "status": "active",
                         "started_at": datetime.utcnow(),
-                        "is_paused": False
+                        "is_paused": False,
+                        "prize_pool": prize_pool,
+                        "prize_distribution": prize_dist,
                     }
-                }
+                },
             )
-            
-            # Get all tickets for this room
             tickets = await db.tickets.find({"room_id": room_id}).to_list(1000)
             serialized_tickets = [serialize_doc(t) for t in tickets]
-            
-            # Broadcast game started with tickets
-            await sio.emit('game_started', {
-                'room_id': room_id,
-                'started_at': str(datetime.utcnow()),
-                'tickets': serialized_tickets
+            await sio.emit("game_started", {
+                "room_id": room_id,
+                "started_at": datetime.utcnow().isoformat(),
+                "tickets": serialized_tickets,
+                "prize_pool": prize_pool,
+                "prize_distribution": prize_dist,
             }, room=room_id)
-            
             logger.info(f"Game started in room {room_id} with {len(tickets)} tickets")
-        
         except Exception as e:
             logger.error(f"Start game error: {e}")
-            await sio.emit('error', {'message': str(e)}, room=sid)
+            await sio.emit("error", {"message": str(e)}, room=sid)
     
     @sio.event
     async def pause_game(sid, data):
@@ -864,8 +654,7 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
                 await sio.emit('error', {'message': 'Only host can delete room'}, room=sid)
                 return
             
-            # Check if game is active
-            if room.get('status') == 'active':
+            if (room.get("status") or "").lower() == "active":
                 await sio.emit('error', {
                     'message': 'Cannot delete room while game is active. Please end the game first.'
                 }, room=sid)

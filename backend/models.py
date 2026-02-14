@@ -101,7 +101,7 @@ class RoomCreate(BaseModel):
     max_players: int = Field(default=50, ge=2, le=100)
     min_players: int = Field(default=2, ge=2)
     auto_start: bool = True
-    prizes: List[PrizeConfig]
+    prizes: List[PrizeConfig] = []  # If empty, server uses standard prize types (amounts at game start)
     password: Optional[str] = None
 
 
@@ -123,6 +123,7 @@ class Room(BaseModel):
     players: List[Dict[str, Any]] = []
     tickets_sold: int = 0
     prize_pool: float = 0.0
+    prize_distribution: Optional[Dict[str, float]] = None  # Set at game start: prize_type -> points
     called_numbers: List[int] = []
     current_number: Optional[int] = None
     is_paused: bool = False
@@ -156,10 +157,11 @@ class Ticket(BaseModel):
     purchased_at: datetime = Field(default_factory=datetime.utcnow)
 
 
-# ============= WALLET MODELS =============
-class WalletAddMoney(BaseModel):
-    amount: float = Field(..., ge=10, le=10000)
-    payment_method: str = "razorpay"
+# ============= POINTS MODELS =============
+class AddPoints(BaseModel):
+    """Add points to user (e.g. purchase / reward). Currency is always points."""
+    amount: float = Field(..., ge=1, le=100000)
+    payment_method: str = "razorpay"  # For future payment gateway
 
 
 class Transaction(BaseModel):
