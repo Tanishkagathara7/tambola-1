@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Dict, Any
 from bson import ObjectId
 
-from models import PrizeType
+from models import PrizeType, RoomStatus
 from game_services import credit_points, compute_prize_distribution
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,7 @@ async def handle_game_completion(sio, db, room_id):
             return
         await db.rooms.update_one(
             {"id": room_id},
-            {"$set": {"status": "completed", "completed_at": datetime.utcnow()}},
+            {"$set": {"status": RoomStatus.COMPLETED.value, "completed_at": datetime.utcnow()}},
         )
         winners = await db.winners.find({"room_id": room_id}).to_list(1000)
         prize_order = {"early_five": 1, "top_line": 2, "middle_line": 3, "bottom_line": 4, "four_corners": 5, "full_house": 6}
@@ -159,67 +159,40 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
     
     @sio.event
     async def join_room(sid, data):
-        """Join a game room"""
+        """Join a game room. No ticket creation here; tickets only via POST /api/tickets/buy."""
         try:
-            room_id = data.get('room_id')
-            user_id = active_connections.get(sid)
-            
-            if not user_id:
-                await sio.emit('error', {'message': 'Not authenticated'}, room=sid)
+            room_id = data.get("room_id")
+            if not room_id:
+                await sio.emit("error", {"message": "room_id required"}, room=sid)
                 return
-            
-            # Join socket.io room
+            user_id = active_connections.get(sid)
+            if not user_id:
+                await sio.emit("error", {"message": "Not authenticated"}, room=sid)
+                return
+            # Prevent duplicate join: already in this room
+            if user_rooms.get(user_id) == room_id:
+                room = await db.rooms.find_one({"id": room_id})
+                if room:
+                    await sio.emit("room_joined", {"room": serialize_doc(room), "user_id": user_id}, room=sid)
+                return
+            room = await db.rooms.find_one({"id": room_id})
+            if not room:
+                await sio.emit("error", {"message": "Room not found"}, room=sid)
+                return
             await sio.enter_room(sid, room_id)
             user_rooms[user_id] = room_id
-            
-            room = await db.rooms.find_one({"id": room_id})
-            if room:
-                room_status = (room.get("status") or "").lower()
-                if room_status == "active":
-                    await sio.emit("game_state_sync", {
-                        "room_id": room_id,
-                        "called_numbers": room.get("called_numbers", []),
-                        "current_number": room.get("current_number"),
-                    }, room=sid)
-
-                # Only auto-create ticket when room is waiting (not mid-game join)
-                existing_ticket = await db.tickets.find_one({"room_id": room_id, "user_id": user_id})
-                if not existing_ticket and room_status == "waiting":
-                    from server_multiplayer import generate_tambola_ticket
-                    ticket_count = await db.tickets.count_documents({"room_id": room_id})
-                    ticket_number = ticket_count + 1
-                    ticket_grid = generate_tambola_ticket(ticket_number)
-                    new_ticket = {
-                        "id": str(uuid.uuid4()),
-                        "room_id": room_id,
-                        "user_id": user_id,
-                        "ticket_number": ticket_number,
-                        "grid": ticket_grid.get("grid"),
-                        "numbers": ticket_grid.get("numbers", []),
-                        "marked_numbers": [],
-                        "created_at": datetime.utcnow(),
-                    }
-                    await db.tickets.insert_one(new_ticket)
-                    logger.info(f"Auto-generated ticket for user {user_id} in room {room_id}")
-
-                serialized_room = serialize_doc(room)
-                
-                await sio.emit('room_joined', {
-                    'room': serialized_room,
-                    'user_id': user_id
+            if room.get("status") == RoomStatus.ACTIVE.value:
+                await sio.emit("game_state_sync", {
+                    "room_id": room_id,
+                    "called_numbers": room.get("called_numbers", []),
+                    "current_number": room.get("current_number"),
                 }, room=sid)
-                
-                # Notify others
-                await sio.emit('player_joined', {
-                    'user_id': user_id,
-                    'room_id': room_id
-                }, room=room_id, skip_sid=sid)
-                
-                logger.info(f"User {user_id} joined room {room_id}")
-        
+            await sio.emit("room_joined", {"room": serialize_doc(room), "user_id": user_id}, room=sid)
+            await sio.emit("player_joined", {"user_id": user_id, "room_id": room_id}, room=room_id, skip_sid=sid)
+            logger.info(f"User {user_id} joined room {room_id}")
         except Exception as e:
             logger.error(f"Join room error: {e}")
-            await sio.emit('error', {'message': str(e)}, room=sid)
+            await sio.emit("error", {"message": str(e)}, room=sid)
 
     
     @sio.event
@@ -259,7 +232,7 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
             if room["host_id"] != user_id:
                 await sio.emit("error", {"message": "Only host can call numbers"}, room=sid)
                 return
-            if (room.get("status") or "").lower() != "active":
+            if room.get("status") != RoomStatus.ACTIVE.value:
                 await sio.emit("error", {"message": "Game not active"}, room=sid)
                 return
 
@@ -495,10 +468,10 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
                 await sio.emit("error", {"message": "No tickets purchased yet"}, room=sid)
                 return
             ticket_price = room.get("ticket_price", 0)
-            tickets_sold = room.get("tickets_sold", 0) or tickets_count
+            current_players = room.get("current_players", 0)
             prize_pool = room.get("prize_pool")
             if prize_pool is None or prize_pool <= 0:
-                prize_pool = tickets_sold * ticket_price
+                prize_pool = current_players * ticket_price
             prize_dist = room.get("prize_distribution")
             if not prize_dist:
                 prize_dist = compute_prize_distribution(prize_pool)
@@ -506,7 +479,7 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
                 {"id": room_id},
                 {
                     "$set": {
-                        "status": "active",
+                        "status": RoomStatus.ACTIVE.value,
                         "started_at": datetime.utcnow(),
                         "is_paused": False,
                         "prize_pool": prize_pool,
@@ -614,7 +587,7 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
                 {"id": room_id},
                 {
                     "$set": {
-                        "status": "completed",
+                        "status": RoomStatus.COMPLETED.value,
                         "completed_at": datetime.utcnow()
                     }
                 }
@@ -654,7 +627,7 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
                 await sio.emit('error', {'message': 'Only host can delete room'}, room=sid)
                 return
             
-            if (room.get("status") or "").lower() == "active":
+            if room.get("status") == RoomStatus.ACTIVE.value:
                 await sio.emit('error', {
                     'message': 'Cannot delete room while game is active. Please end the game first.'
                 }, room=sid)

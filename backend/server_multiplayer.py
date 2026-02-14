@@ -525,15 +525,13 @@ async def delete_room(
     if room["host_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Only host can delete the room")
 
-    room_status = room.get("status") or ""
-    if room_status == RoomStatus.ACTIVE.value or room_status == RoomStatus.ACTIVE:
+    room_status = room.get("status")
+    if room_status == RoomStatus.ACTIVE.value:
         raise HTTPException(
             status_code=400,
             detail="Cannot delete room while game is active. Please end the game first.",
         )
-
-    # Refund points when game had not started (before deleting tickets)
-    if room_status == RoomStatus.WAITING.value or room_status == RoomStatus.WAITING:
+    if room_status == RoomStatus.WAITING.value:
         ticket_price = room.get("ticket_price", 0)
         tickets = await db.tickets.find({"room_id": room_id}).to_list(1000)
         user_ticket_counts = {}
@@ -663,18 +661,26 @@ async def join_room(
 @api_router.post("/tickets/buy", response_model=MessageResponse)
 async def buy_tickets(
     purchase: TicketPurchase,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
-    """Purchase tickets for a room. Only when room status is WAITING."""
+    """
+    Purchase tickets. Body: { "room_id": string, "quantity": int } (quantity 1-10).
+    Room must exist and be WAITING. Uses points only; atomic debit.
+    """
     room = await db.rooms.find_one({"id": purchase.room_id})
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-
-    room_status = (room.get("status") or "").lower()
-    if room_status != RoomStatus.WAITING.value:
+    if room.get("status") != RoomStatus.WAITING.value:
         raise HTTPException(status_code=400, detail="Cannot buy tickets after game starts")
-
+    if not (1 <= purchase.quantity <= 10):
+        raise HTTPException(status_code=400, detail="Quantity must be between 1 and 10")
     total_cost = room["ticket_price"] * purchase.quantity
+    points_balance = current_user.get("points_balance", 0)
+    if points_balance < total_cost:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient points balance: have {points_balance}, need {total_cost}",
+        )
     try:
         new_balance = await debit_points(
             db,
@@ -777,11 +783,10 @@ async def cleanup_rooms():
     """Cleanup old empty rooms (auto-called or manual)"""
     # Find rooms created > 1 hour ago AND (no players OR status is cancelled)
     one_hour_ago = datetime.utcnow() - timedelta(hours=1)
-    
     result = await db.rooms.delete_many({
         "$or": [
             {"created_at": {"$lt": one_hour_ago}, "current_players": 0},
-            {"status": RoomStatus.CANCELLED, "created_at": {"$lt": one_hour_ago}}
+            {"status": RoomStatus.CANCELLED.value, "created_at": {"$lt": one_hour_ago}}
         ]
     })
     
@@ -793,7 +798,7 @@ async def cleanup_rooms():
 async def get_completed_rooms(limit: int = 10):
     """Get recently completed rooms with winners"""
     rooms = await db.rooms.find({
-        "status": RoomStatus.COMPLETED
+        "status": RoomStatus.COMPLETED.value
     }).sort("completed_at", -1).limit(limit).to_list(limit)
     
     # Serialize to remove ObjectId
@@ -814,8 +819,7 @@ async def start_game(
     if room["host_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Only host can start the game")
 
-    room_status = (room.get("status") or "").lower()
-    if room_status != RoomStatus.WAITING.value:
+    if room.get("status") != RoomStatus.WAITING.value:
         raise HTTPException(status_code=400, detail="Game already started or completed")
 
     if room.get("current_players", 0) < room.get("min_players", 2):
@@ -826,9 +830,9 @@ async def start_game(
     tickets_sold = room.get("tickets_sold", 0)
     if tickets_sold <= 0:
         raise HTTPException(status_code=400, detail="No tickets sold. At least one ticket required to start.")
-
+    current_players = room.get("current_players", 0)
     ticket_price = room.get("ticket_price", 0)
-    prize_pool = tickets_sold * ticket_price
+    prize_pool = current_players * ticket_price
     prize_distribution = compute_prize_distribution(prize_pool)
 
     await db.rooms.update_one(
@@ -866,7 +870,7 @@ async def call_number_api(
         raise HTTPException(status_code=404, detail="Room not found")
     if room["host_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Only host can call numbers")
-    if (room.get("status") or "").lower() != RoomStatus.ACTIVE.value:
+    if room.get("status") != RoomStatus.ACTIVE.value:
         raise HTTPException(status_code=400, detail="Game not active")
     
     called_numbers = room.get("called_numbers", [])
@@ -922,7 +926,7 @@ async def claim_prize_api(
     room = await db.rooms.find_one({"id": room_id})
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    if (room.get("status") or "").lower() not in (RoomStatus.ACTIVE.value, RoomStatus.COMPLETED.value):
+    if room.get("status") not in (RoomStatus.ACTIVE.value, RoomStatus.COMPLETED.value):
         raise HTTPException(status_code=400, detail="Game not active or completed")
 
     ticket = await db.tickets.find_one({"id": claim.ticket_id})
@@ -1071,6 +1075,6 @@ app.include_router(api_router)
 
 if __name__ == "__main__":
     import uvicorn
-    # Use import string for reload; socket_app is the ASGI app
-    # Changed port to 8001 to avoid conflict with port 8000
-    uvicorn.run("server_multiplayer:socket_app", host="0.0.0.0", port=8001, reload=True)
+    # Do not use reload=True in production (causes random shutdowns)
+    use_reload = os.getenv("RELOAD", "false").lower() == "true"
+    uvicorn.run("server_multiplayer:socket_app", host="0.0.0.0", port=8001, reload=use_reload)
