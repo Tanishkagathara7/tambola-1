@@ -233,14 +233,22 @@ export default function LobbyScreen() {
 
   const handleWatchAd = async () => {
     try {
-      // In a real app, show ad here
-      await adsAPI.watchRewarded();
-      Alert.alert('Success', 'You earned 10 points!');
-      // Refresh user profile to update points
-      // useAuth().refreshProfile(); // Assuming this exists or simple context update
-      // Since context update might be async/complex, we let the context handle it if it listens or just wait for next profile fetch
-    } catch (error) {
-      Alert.alert('Error', 'Failed to watch ad');
+      console.log('Testing ads ping endpoint...');
+      const pingResult = await adsAPI.ping();
+      console.log('Ping result:', pingResult);
+      
+      console.log('Testing ads test endpoint...');
+      const testResult = await adsAPI.test();
+      console.log('Test result:', testResult);
+      
+      console.log('Testing ads rewarded endpoint...');
+      const rewardResult = await adsAPI.watchRewarded();
+      console.log('Reward result:', rewardResult);
+      
+      Alert.alert('Success!', 'You earned 10 points! All endpoints working.');
+    } catch (error: any) {
+      console.error('Error in ads test:', error);
+      Alert.alert('Debug Info', `Error: ${error.message}\nCheck console for details`);
     }
   };
 

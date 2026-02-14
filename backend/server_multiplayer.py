@@ -84,6 +84,11 @@ async def root():
         "status": "ok",
         "message": "Tambola Multiplayer API is running",
         "version": "2.0.0",
+        "ads_endpoints": {
+            "ping": "/api/ads/ping",
+            "test": "/api/ads/test", 
+            "rewarded": "/api/ads/rewarded"
+        },
         "endpoints": {
             "api": "/api",
             "docs": "/docs",

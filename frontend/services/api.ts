@@ -245,15 +245,21 @@ export const ticketAPI = {
 };
 
 // ============= ADS API =============
+// ============= ADS API =============
 export const adsAPI = {
+  ping: async () => {
+    return apiFetch('/ads/ping', {
+      method: 'POST',
+    });
+  },
+  test: async () => {
+    return apiFetch('/ads/test', {
+      method: 'POST',
+    });
+  },
   watchRewarded: async () => {
     return apiFetch('/ads/rewarded', {
       method: 'POST',
-      body: JSON.stringify({
-        ad_network,
-        reward_token,
-        reward_amount,
-      }),
     });
   },
 };
