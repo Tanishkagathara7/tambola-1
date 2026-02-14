@@ -201,23 +201,18 @@ export default function LiveGameScreen() {
 
   const handleTicketUpdated = (data: any) => {
     console.log('Ticket updated:', data);
-    // Update local ticket state with server-marked numbers
-    if (data.ticket) {
-      setTickets((prevTickets) =>
-        prevTickets.map((ticket) =>
-          ticket.id === data.ticket.id
-            ? { ...ticket, marked_numbers: data.ticket.marked_numbers || [] }
-            : ticket
-        )
-      );
-
-      // Update selected ticket if it's the one that was updated
-      setSelectedTicket((prev) =>
-        prev && prev.id === data.ticket.id
-          ? { ...prev, marked_numbers: data.ticket.marked_numbers || [] }
-          : prev
-      );
-    }
+    // Backend sends { ticket_id, marked_numbers, last_called_number }
+    const ticketId = data.ticket_id || data.ticket?.id;
+    const marked = data.marked_numbers ?? data.ticket?.marked_numbers ?? [];
+    if (!ticketId) return;
+    setTickets((prevTickets) =>
+      prevTickets.map((ticket) =>
+        ticket.id === ticketId ? { ...ticket, marked_numbers: marked } : ticket
+      )
+    );
+    setSelectedTicket((prev) =>
+      prev && prev.id === ticketId ? { ...prev, marked_numbers: marked } : prev
+    );
   };
 
   const handleGameStateSync = (data: any) => {
@@ -637,9 +632,7 @@ export default function LiveGameScreen() {
                   style={[
                     styles.ticketCell,
                     cell !== null && styles.ticketCellFilled,
-                    cell !== null &&
-                    ticket.marked_numbers.includes(cell) &&
-                    styles.ticketCellMarked,
+                    cell !== null && ticket.marked_numbers.includes(cell) && styles.ticketCellMarked,
                     cell === room?.current_number && styles.ticketCellCurrent,
                   ]}
                   onPress={() => cell !== null && handleManualMark(cell)}
@@ -1163,7 +1156,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFD700',
   },
   ticketCellMarked: {
-    backgroundColor: '#4ECDC4',
+    backgroundColor: '#42A5F5',
   },
   ticketCellCurrent: {
     backgroundColor: '#FF6B35',

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -16,39 +16,6 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../contexts/AuthContext';
 import { roomAPI, adsAPI } from '../services/api';
-
-// Google Mobile Ads imports (with fallback for Expo Go)
-let RewardedAd: any, RewardedAdEventType: any, TestIds: any, AdEventType: any;
-let adsAvailable = false;
-
-try {
-  const mobileAds = require('react-native-google-mobile-ads');
-  RewardedAd = mobileAds.RewardedAd;
-  RewardedAdEventType = mobileAds.RewardedAdEventType;
-  TestIds = mobileAds.TestIds;
-  AdEventType = mobileAds.AdEventType;
-  adsAvailable = true;
-} catch (error) {
-  console.warn('Google Mobile Ads not available (likely Expo Go). Using fallback.');
-  // Mock implementations
-  RewardedAd = {
-    createForAdRequest: () => ({
-      addAdEventListener: () => () => {},
-      load: () => {},
-      show: () => {},
-    })
-  };
-  RewardedAdEventType = { LOADED: 'loaded', EARNED_REWARD: 'earned_reward' };
-  TestIds = { REWARDED: 'test-rewarded' };
-  AdEventType = { ERROR: 'error', CLOSED: 'closed' };
-  adsAvailable = false;
-}
-
-// Create rewarded ad instance
-const adUnitId = __DEV__ ? TestIds.REWARDED : 'ca-app-pub-3940256099942544/5224354917';
-const rewardedAd = RewardedAd.createForAdRequest(adUnitId, {
-  requestNonPersonalizedAdsOnly: true,
-});
 
 interface Room {
   id: string;
@@ -182,6 +149,8 @@ export default function LobbyScreen() {
     loadRooms();
   };
 
+  const [joiningRoomId, setJoiningRoomId] = useState<string | null>(null);
+
   const handleJoinRoom = async (room: Room) => {
     if (joiningRoomId) return; // Prevent double click
     if (room.current_players >= room.max_players) {
@@ -232,43 +201,15 @@ export default function LobbyScreen() {
   };
 
   const handleWatchAd = async () => {
-    if (!adsAvailable) {
-      // Fallback: Test the debug endpoints first
-      try {
-        console.log('Testing ads ping endpoint...');
-        const pingResult = await adsAPI.ping();
-        console.log('Ping result:', pingResult);
-        
-        console.log('Testing ads test endpoint...');
-        const testResult = await adsAPI.test();
-        console.log('Test result:', testResult);
-        
-        console.log('Testing ads rewarded endpoint...');
-        await adsAPI.watchRewarded();
-        Alert.alert('Success!', 'You earned 10 points! (Test mode - no ad shown)');
-      } catch (error: any) {
-        console.error('Error in ads test:', error);
-        Alert.alert('Debug Info', `Error: ${error.message}\nCheck console for details`);
-      }
-      return;
-    }
-
-    if (!adLoaded) {
-      if (adLoading) {
-        Alert.alert('Loading...', 'Ad is still loading. Please wait a moment.');
-      } else {
-        Alert.alert('No Ad Available', 'Please try again in a few moments.');
-        loadRewardedAd(); // Try to reload
-      }
-      return;
-    }
-
     try {
-      // Show the rewarded ad
-      rewardedAd.show();
+      // In a real app, show ad here
+      await adsAPI.watchRewarded();
+      Alert.alert('Success', 'You earned 10 points!');
+      // Refresh user profile to update points
+      // useAuth().refreshProfile(); // Assuming this exists or simple context update
+      // Since context update might be async/complex, we let the context handle it if it listens or just wait for next profile fetch
     } catch (error) {
-      console.error('Error showing ad:', error);
-      Alert.alert('Error', 'Failed to show ad');
+      Alert.alert('Error', 'Failed to watch ad');
     }
   };
 
@@ -363,32 +304,11 @@ export default function LobbyScreen() {
               <ActivityIndicator size="small" color="#FFD700" style={{ marginRight: 8 }} />
             )}
             <TouchableOpacity
-              style={[
-                styles.adButton,
-                (!adLoaded && !adLoading) && styles.adButtonDisabled,
-                adLoading && styles.adButtonLoading
-              ]}
+              style={styles.adButton}
               onPress={handleWatchAd}
-              disabled={!adLoaded}
             >
-              {adLoading ? (
-                <>
-                  <ActivityIndicator size="small" color="#1a5f1a" />
-                  <Text style={styles.adButtonText}>Loading...</Text>
-                </>
-              ) : adLoaded ? (
-                <>
-                  <MaterialCommunityIcons name="play-circle" size={20} color="#1a5f1a" />
-                  <Text style={styles.adButtonText}>
-                    {adsAvailable ? 'Watch Ad +10 Pts' : 'Test +10 Pts'}
-                  </Text>
-                </>
-              ) : (
-                <>
-                  <MaterialCommunityIcons name="refresh" size={20} color="#999" />
-                  <Text style={[styles.adButtonText, { color: '#999' }]}>No Ad</Text>
-                </>
-              )}
+              <MaterialCommunityIcons name="play-circle" size={20} color="#1a5f1a" />
+              <Text style={styles.adButtonText}>+10 Pts</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.walletButton}

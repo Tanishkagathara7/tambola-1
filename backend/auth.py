@@ -1,5 +1,7 @@
 """
-Authentication utilities - JWT tokens and password hashing
+Authentication utilities - JWT tokens and password hashing.
+REST only: all protected endpoints require Authorization: Bearer <JWT>.
+Socket authentication is separate and must not be mixed with REST.
 """
 from datetime import datetime, timedelta
 from typing import Optional
@@ -15,11 +17,10 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
 # Password hashing
-# Using argon2 as default to avoid bcrypt's 72-byte limit
 pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
 
-# Bearer token
-security = HTTPBearer()
+# Bearer token: auto_error=False so we can return 401 with clear message when header missing
+security = HTTPBearer(auto_error=False)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -60,38 +61,43 @@ def decode_token(token: str) -> dict:
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> dict:
-    """Get current authenticated user from token"""
+    """
+    REST auth only. Requires: Authorization: Bearer <JWT>.
+    Returns 401 with clear message if header missing. Do not mix with socket auth.
+    """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header missing",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     token = credentials.credentials
     payload = decode_token(token)
-    
     user_id: str = payload.get("sub")
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials"
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    # Get user from database - will be injected by the route
     from motor.motor_asyncio import AsyncIOMotorClient
     mongo_url = os.getenv("MONGO_URL")
     client = AsyncIOMotorClient(mongo_url)
     db = client[os.getenv("DB_NAME")]
-    
     user = await db.users.find_one({"id": user_id})
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found"
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    
     if user.get("is_banned"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="User is banned"
+            detail="User is banned",
         )
-    
     return user
 
 

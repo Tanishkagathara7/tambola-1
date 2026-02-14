@@ -14,14 +14,15 @@ import random
 import socketio
 import uuid
 
-# Import models and auth
+# Import models, auth, and game services
 from models import *
 from auth import (
-    get_password_hash, 
-    verify_password, 
-    create_user_token, 
-    get_current_user
+    get_password_hash,
+    verify_password,
+    create_user_token,
+    get_current_user,
 )
+from game_services import credit_points, debit_points, compute_prize_distribution
 
 # Load environment
 ROOT_DIR = Path(__file__).parent
@@ -301,51 +302,41 @@ async def signup(user_data: UserCreate):
         password_hash=get_password_hash(user_data.password)
     )
     
-    await db.users.insert_one(user.dict())
-    
-    # Create wallet with 50 points initial balance
-    wallet_id = str(uuid.uuid4())
-    wallet = {
-        "id": wallet_id,
-        "user_id": user.id,
-        "balance": 50.0,  # 50 points initial balance
-        "created_at": datetime.utcnow()
-    }
-    await db.wallets.insert_one(wallet)
-    
-    # Create initial transaction record
-    transaction_id = str(uuid.uuid4())
+    # Set initial points balance (no wallet collection)
+    initial_points = 50.0
+    user_dict = user.dict()
+    user_dict["points_balance"] = initial_points
+    await db.users.insert_one(user_dict)
+
+    # Create initial points transaction
     await db.transactions.insert_one({
-        "id": transaction_id,
+        "id": str(uuid.uuid4()),
         "user_id": user.id,
         "type": "credit",
-        "amount": 50.0,
+        "currency": "points",
+        "amount": initial_points,
         "description": "Welcome bonus - Initial 50 Points",
-        "created_at": datetime.utcnow()
+        "balance_after": initial_points,
+        "created_at": datetime.utcnow(),
     })
-    
-    await db.users.update_one(
-        {"id": user.id},
-        {"$set": {"points_balance": 50.0}}
-    )
-    
-    logger.info(f"Created new user {user.id} with 50 points welcome bonus")
+
+    logger.info(f"Created new user {user.id} with {initial_points} points welcome bonus")
     
     # Create token
     token = create_user_token(user.id, user.email)
     
-    # Return user profile
+    # Return user profile (user_dict has points_balance)
     profile = UserProfile(
         id=user.id,
         name=user.name,
         email=user.email,
         mobile=user.mobile,
         profile_pic=user.profile_pic,
-        points_balance=user.points_balance,
-        total_games=user.total_games,
-        total_wins=user.total_wins,
-        total_winnings=user.total_winnings,
-        created_at=user.created_at
+        points_balance=initial_points,
+        total_games=0,
+        total_wins=0,
+        total_winnings=0.0,
+        created_at=user.created_at,
     )
     
     return Token(access_token=token, user=profile)
@@ -412,14 +403,17 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
 
 
 def generate_standard_prizes():
-    """Generate standard prize configuration matching offline game"""
+    """
+    Standard prize types for room config. Actual amounts are computed at game start
+    via compute_prize_distribution(prize_pool). These are for display/config only.
+    """
     return [
-        {"prize_type": "early_five", "amount": 15, "percentage": 15},  # 15% of pool
-        {"prize_type": "top_line", "amount": 15, "percentage": 15},    # 15% of pool
-        {"prize_type": "middle_line", "amount": 15, "percentage": 15}, # 15% of pool
-        {"prize_type": "bottom_line", "amount": 15, "percentage": 15}, # 15% of pool
-        {"prize_type": "four_corners", "amount": 10, "percentage": 10}, # 10% of pool
-        {"prize_type": "full_house", "amount": 30, "percentage": 30}   # 30% of pool
+        {"prize_type": "early_five", "amount": 0, "percentage": 10},
+        {"prize_type": "top_line", "amount": 0, "percentage": 10},
+        {"prize_type": "middle_line", "amount": 0, "percentage": 10},
+        {"prize_type": "bottom_line", "amount": 0, "percentage": 10},
+        {"prize_type": "four_corners", "amount": 0, "percentage": 10},
+        {"prize_type": "full_house", "amount": 0, "percentage": 50},
     ]
 
 
@@ -437,7 +431,7 @@ async def get_rooms(
     if status:
         query["status"] = status
     else:
-        query["status"] = {"$in": [RoomStatus.WAITING, RoomStatus.ACTIVE]}
+        query["status"] = {"$in": [RoomStatus.WAITING.value, RoomStatus.ACTIVE.value]}
     
     rooms = await db.rooms.find(query).sort("created_at", -1).limit(50).to_list(50)
     # Serialize to remove ObjectId
@@ -523,50 +517,56 @@ async def delete_room(
     room_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    """Delete a room (host only)"""
+    """Delete a room (host only). Refunds ticket cost when room was still waiting."""
     room = await db.rooms.find_one({"id": room_id})
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    
-    # Check if user is the host
+
     if room["host_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Only host can delete the room")
-    
-    # Check if game is active - prevent deletion during active game
-    if room.get("status") == RoomStatus.ACTIVE:
+
+    room_status = room.get("status")
+    if room_status == RoomStatus.ACTIVE.value:
         raise HTTPException(
-            status_code=400, 
-            detail="Cannot delete room while game is active. Please end the game first."
+            status_code=400,
+            detail="Cannot delete room while game is active. Please end the game first.",
         )
-    
-    # Delete associated data
-    # 1. Delete all tickets for this room
+    if room_status == RoomStatus.WAITING.value:
+        ticket_price = room.get("ticket_price", 0)
+        tickets = await db.tickets.find({"room_id": room_id}).to_list(1000)
+        user_ticket_counts = {}
+        for t in tickets:
+            uid = t.get("user_id")
+            if uid:
+                user_ticket_counts[uid] = user_ticket_counts.get(uid, 0) + 1
+        for uid, count in user_ticket_counts.items():
+            refund = ticket_price * count
+            try:
+                await credit_points(
+                    db, uid, refund,
+                    f"Refund for room deletion: {room.get('name', room_id)}",
+                    room_id=room_id,
+                )
+            except Exception as e:
+                logger.warning(f"Refund failed for user {uid}: {e}")
+
     tickets_result = await db.tickets.delete_many({"room_id": room_id})
-    
-    # 2. Delete all winners for this room
     winners_result = await db.winners.delete_many({"room_id": room_id})
-    
-    # 3. Delete all transactions related to this room (optional - keep for audit trail)
-    # transactions_result = await db.transactions.delete_many({"room_id": room_id})
-    
-    # 4. Delete the room itself
     await db.rooms.delete_one({"id": room_id})
-    
-    # Broadcast room deletion to all connected clients
-    await sio.emit('room_deleted', {
+
+    await sio.emit("room_deleted", {
         "room_id": room_id,
-        "deleted_by": current_user["id"]
+        "deleted_by": current_user["id"],
     })
-    
-    logger.info(f"Room {room_id} deleted by host {current_user['id']} - {tickets_result.deleted_count} tickets, {winners_result.deleted_count} winners removed")
-    
+
+    logger.info(f"Room {room_id} deleted by host {current_user['id']}")
     return MessageResponse(
         message="Room deleted successfully",
         data={
             "room_id": room_id,
             "tickets_deleted": tickets_result.deleted_count,
-            "winners_deleted": winners_result.deleted_count
-        }
+            "winners_deleted": winners_result.deleted_count,
+        },
     )
 
 
@@ -626,361 +626,178 @@ async def join_room(
     join_data: RoomJoin,
     current_user: dict = Depends(get_current_user)
 ):
-    """Join a game room"""
+    """Join a game room. Mid-game join allowed (ACTIVE): user can observe; cannot buy tickets after game starts."""
     room = await db.rooms.find_one({"id": room_id})
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    
-    # Check if room is full
+
     if room["current_players"] >= room["max_players"]:
         raise HTTPException(status_code=400, detail="Room is full")
-    
-    # Check if already joined
+
     player_ids = [p["id"] for p in room.get("players", [])]
     if current_user["id"] in player_ids:
-        # Return success if already in room (idempotent)
         return MessageResponse(message="Already in room", data={"room_id": room_id})
-    
-    # Check password for private rooms
-    if room["room_type"] == RoomType.PRIVATE and room.get("password"):
+
+    if (room.get("room_type") or "").lower() == "private" and room.get("password"):
         if not join_data.password or join_data.password != room["password"]:
             raise HTTPException(status_code=403, detail="Invalid room password")
-    
-    # Add player to room
+
     player = {
         "id": current_user["id"],
         "name": current_user["name"],
         "profile_pic": current_user.get("profile_pic"),
-        "joined_at": datetime.utcnow()
+        "joined_at": datetime.utcnow(),
     }
-    
     await db.rooms.update_one(
         {"id": room_id},
-        {
-            "$push": {"players": player},
-            "$inc": {"current_players": 1}
-        }
+        {"$push": {"players": player}, "$inc": {"current_players": 1}},
     )
-    
-    # Serialize player for socket emission (convert datetime to string)
     serialized_player = serialize_doc(player)
-    
-    # Broadcast player joined
-    await sio.emit('player_joined', {
-        "room_id": room_id,
-        "player": serialized_player
-    }, room=room_id)
-    
+    await sio.emit("player_joined", {"room_id": room_id, "player": serialized_player}, room=room_id)
     return MessageResponse(message="Joined room successfully", data={"room_id": room_id})
-
-
-@api_router.delete("/rooms/{room_id}", response_model=MessageResponse)
-async def delete_room(
-    room_id: str,
-    current_user: dict = Depends(get_current_user)
-):
-    """Delete a room (host only)"""
-    room = await db.rooms.find_one({"id": room_id})
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-    
-    # Check if user is host
-    if room["host_id"] != current_user["id"]:
-        raise HTTPException(status_code=403, detail="Only host can delete the room")
-    
-    # Check if game is active
-    if room["status"] == RoomStatus.ACTIVE:
-        raise HTTPException(
-            status_code=400, 
-            detail="Cannot delete room while game is active. Please end the game first."
-        )
-    
-    # Delete all tickets associated with this room
-    tickets_result = await db.tickets.delete_many({"room_id": room_id})
-    
-    # Delete all winners associated with this room
-    winners_result = await db.winners.delete_many({"room_id": room_id})
-    
-    # Refund players who bought tickets (if game hasn't started)
-    if room["status"] == RoomStatus.WAITING:
-        # Get all tickets that were purchased
-        ticket_price = room.get("ticket_price", 0)
-        
-        # Group tickets by user to calculate refunds
-        tickets = await db.tickets.find({"room_id": room_id}).to_list(1000)
-        user_ticket_counts = {}
-        for ticket in tickets:
-            user_id = ticket.get("user_id")
-            if user_id:
-                user_ticket_counts[user_id] = user_ticket_counts.get(user_id, 0) + 1
-        
-        # Refund each user
-        for user_id, ticket_count in user_ticket_counts.items():
-            refund_amount = ticket_price * ticket_count
-            
-            # Credit back to user
-            await db.users.update_one(
-                {"id": user_id},
-                {"$inc": {"points_balance": refund_amount}}
-            )
-            
-            # Create refund transaction
-            transaction = Transaction(
-                user_id=user_id,
-                amount=refund_amount,
-                type=TransactionType.CREDIT,
-                description=f"Refund for room deletion: {room['name']}",
-                balance_after=0,  # Will be updated by actual balance
-                room_id=room_id
-            )
-            await db.transactions.insert_one(transaction.dict())
-            
-            logger.info(f"Refunded {refund_amount} points to user {user_id} for room {room_id}")
-    
-    # Delete the room
-    await db.rooms.delete_one({"id": room_id})
-    
-    # Broadcast room deleted via socket
-    await sio.emit('room_deleted', {
-        "room_id": room_id,
-        "message": "Room has been deleted by the host"
-    }, room=room_id)
-    
-    logger.info(f"Room {room_id} deleted by host {current_user['id']}")
-    
-    return MessageResponse(
-        message="Room deleted successfully",
-        data={
-            "room_id": room_id,
-            "tickets_deleted": tickets_result.deleted_count,
-            "winners_deleted": winners_result.deleted_count
-        }
-    )
 
 
 # ============= TICKET ROUTES =============
 @api_router.post("/tickets/buy", response_model=MessageResponse)
 async def buy_tickets(
     purchase: TicketPurchase,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
-    """Purchase tickets for a room"""
+    """
+    Purchase tickets. Body: { "room_id": string, "quantity": int } (quantity 1-5).
+    Room must exist and be WAITING. Fetches user fresh; atomic debit; returns serialized tickets.
+    """
     room = await db.rooms.find_one({"id": purchase.room_id})
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    
-    if room["status"] != RoomStatus.WAITING:
+    if room.get("status") != RoomStatus.WAITING.value:
         raise HTTPException(status_code=400, detail="Cannot buy tickets after game starts")
-    
-    # Calculate total cost
+    if not (1 <= purchase.quantity <= 5):
+        raise HTTPException(status_code=400, detail="Quantity must be between 1 and 5")
     total_cost = room["ticket_price"] * purchase.quantity
-    
-    # Check wallet balance
-    if current_user["points_balance"] < total_cost:
-        raise HTTPException(status_code=400, detail="Insufficient points balance")
-    
-    # Generate tickets
+    user = await db.users.find_one({"id": current_user["id"]})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    points_balance = user.get("points_balance", 0)
+    if points_balance < total_cost:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient points balance: have {points_balance}, need {total_cost}",
+        )
+    try:
+        new_balance = await debit_points(
+            db,
+            current_user["id"],
+            total_cost,
+            f"Purchased {purchase.quantity} ticket(s) for {room['name']}",
+            room_id=purchase.room_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     tickets = []
     current_ticket_count = await db.tickets.count_documents({"room_id": purchase.room_id})
-    
     for i in range(purchase.quantity):
         ticket_number = current_ticket_count + i + 1
         ticket_data = generate_tambola_ticket(ticket_number)
-        
-        ticket = Ticket(
-            ticket_number=ticket_number,
-            user_id=current_user["id"],
-            user_name=current_user["name"],
-            room_id=purchase.room_id,
-            grid=ticket_data["grid"],
-            numbers=ticket_data["numbers"]
-        )
-        tickets.append(ticket.dict())
-    
-    # Insert tickets
+        ticket_doc = {
+            "id": str(uuid.uuid4()),
+            "room_id": purchase.room_id,
+            "user_id": current_user["id"],
+            "user_name": current_user["name"],
+            "ticket_number": ticket_number,
+            "grid": ticket_data["grid"],
+            "numbers": ticket_data["numbers"],
+            "marked_numbers": [],
+        }
+        tickets.append(ticket_doc)
+
     await db.tickets.insert_many(tickets)
-    
-    # Deduct from wallet
-    new_balance = current_user["points_balance"] - total_cost
-    await db.users.update_one(
-        {"id": current_user["id"]},
-        {"$set": {"points_balance": new_balance}}
-    )
-    
-    # Create transaction
-    transaction = Transaction(
-        user_id=current_user["id"],
-        amount=total_cost,
-        type=TransactionType.DEBIT,
-        description=f"Purchased {purchase.quantity} ticket(s) for {room['name']}",
-        balance_after=new_balance,
-        room_id=purchase.room_id
-    )
-    await db.transactions.insert_one(transaction.dict())
-    
-    # Update room with dynamic prize pool
-    # Update tickets sold count first
     await db.rooms.update_one(
         {"id": purchase.room_id},
-        {"$inc": {"tickets_sold": purchase.quantity}}
+        {"$inc": {"tickets_sold": purchase.quantity}},
     )
+    logger.info(f"[TICKET] Inserted {len(tickets)} tickets for user {current_user['id']} room {purchase.room_id}")
 
-    # Recalculate prize pool based on TOTAL tickets sold * ticket price
-    updated_room = await db.rooms.find_one({"id": purchase.room_id})
-    if updated_room:
-        current_tickets_sold = updated_room.get("tickets_sold", 0)
-        ticket_price = updated_room.get("ticket_price", 0)
-        
-        # Prize pool = Total Tickets Sold * Ticket Price
-        # (Winning distribution calculated at game start or end)
-        new_prize_pool = current_tickets_sold * ticket_price
-        
-        await db.rooms.update_one(
-            {"id": purchase.room_id},
-            {"$set": {"prize_pool": new_prize_pool}}
-        )
-    
-    logger.info(f"User {current_user['id']} bought {purchase.quantity} tickets for room {purchase.room_id}")
-    
+    serialized = [serialize_doc(t) for t in tickets]
     return MessageResponse(
         message=f"Successfully purchased {purchase.quantity} ticket(s)",
-        data={"tickets": tickets, "new_balance": new_balance}
+        data={"tickets": serialized, "points_balance": new_balance},
     )
 
 
-# ============= WALLET ROUTES =============
-@api_router.get("/wallet/balance")
-async def get_wallet_balance(current_user: dict = Depends(get_current_user)):
-    """Get points balance"""
-    return {"balance": current_user.get("points_balance", 0.0)}
+# ============= POINTS ROUTES =============
+@api_router.get("/points/balance")
+async def get_points_balance(current_user: dict = Depends(get_current_user)):
+    """Get current user points balance. Always fetches fresh from DB."""
+    user = await db.users.find_one({"id": current_user["id"]})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"points_balance": user.get("points_balance", 0.0)}
 
 
-@api_router.post("/wallet/add-money", response_model=MessageResponse)
-async def add_money(
-    wallet_data: WalletAddMoney,
-    current_user: dict = Depends(get_current_user)
+@api_router.post("/points/add-points", response_model=MessageResponse)
+async def add_points(
+    data: AddPoints,
+    current_user: dict = Depends(get_current_user),
 ):
-    """Add money to wallet (payment gateway integration needed)"""
-    # TODO: Integrate with Razorpay or other payment gateway
-    # For now, just add money directly (for testing)
-    
-    new_balance = current_user.get("points_balance", 0.0) + wallet_data.amount
-    
-    await db.users.update_one(
-        {"id": current_user["id"]},
-        {"$set": {"points_balance": new_balance}}
-    )
-    
-    # Create transaction
-    transaction = Transaction(
-        user_id=current_user["id"],
-        amount=wallet_data.amount,
-        type=TransactionType.CREDIT,
-        description=f"Added money via {wallet_data.payment_method}",
-        balance_after=new_balance
-    )
-    await db.transactions.insert_one(transaction.dict())
-    
-    logger.info(f"User {current_user['id']} added ₹{wallet_data.amount} to wallet")
-    
+    """Add points to user (e.g. payment gateway or admin). Currency is always points."""
+    try:
+        new_balance = await credit_points(
+            db,
+            current_user["id"],
+            data.amount,
+            f"Added points via {data.payment_method}",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return MessageResponse(
-        message=f"Successfully added ₹{wallet_data.amount}",
-        data={"new_balance": new_balance}
+        message=f"Successfully added {data.amount} points",
+        data={"points_balance": new_balance},
     )
 
 
-@api_router.get("/wallet/transactions", response_model=List[Transaction])
-async def get_transactions(
+@api_router.get("/points/transactions", response_model=List[Transaction])
+async def get_points_transactions(
     limit: int = 50,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
-    """Get transaction history"""
-    transactions = await db.transactions.find({
-        "user_id": current_user["id"]
-    }).sort("created_at", -1).limit(limit).to_list(limit)
-    
+    """Get points transaction history."""
+    transactions = await db.transactions.find(
+        {"user_id": current_user["id"]}
+    ).sort("created_at", -1).limit(limit).to_list(limit)
     return [Transaction(**txn) for txn in transactions]
 
 
 # ============= ADS ROUTES =============
-@api_router.post("/ads/ping")
-async def ads_ping():
-    """Simple ping endpoint to test ads route"""
-    return {"message": "Ads endpoint is working", "timestamp": datetime.utcnow().isoformat()}
-
-@api_router.post("/ads/test")
-async def ads_test(current_user: dict = Depends(get_current_user)):
-    """Test endpoint to debug ads issues"""
-    try:
-        logger.info(f"Test endpoint called by user: {current_user}")
-        return {
-            "message": "Test successful",
-            "user_id": current_user.get("id"),
-            "user_data": {
-                "name": current_user.get("name"),
-                "email": current_user.get("email"),
-                "points_balance": current_user.get("points_balance", "NOT_SET"),
-                "has_points_balance": "points_balance" in current_user
-            }
-        }
-    except Exception as e:
-        logger.error(f"Test endpoint error: {e}")
-        return {"error": str(e)}
-
-@api_router.post("/ads/rewarded")
+@api_router.post("/ads/rewarded", response_model=MessageResponse)
 async def ads_rewarded(current_user: dict = Depends(get_current_user)):
     """Reward user for watching an ad"""
-    try:
-        logger.info(f"Ads endpoint called by user: {current_user.get('id', 'unknown')}")
-        
-        reward_points = 10.0
-        
-        # Get current balance safely
-        current_balance = float(current_user.get("points_balance", 0.0))
-        new_balance = current_balance + reward_points
-        
-        logger.info(f"Current balance: {current_balance}, New balance: {new_balance}")
-        
-        # Validate balance values
-        if current_balance < 0:
-            current_balance = 0.0
-            new_balance = reward_points
-        
-        # Update user balance
-        update_result = await db.users.update_one(
-            {"id": current_user["id"]},
-            {"$set": {"points_balance": new_balance}}
-        )
-        
-        logger.info(f"User balance update result: {update_result.modified_count} documents modified")
-        
-        # Create transaction record
-        transaction_data = {
-            "id": str(uuid.uuid4()),
-            "user_id": current_user["id"],
-            "amount": reward_points,
-            "type": "credit",  # Use string instead of enum
-            "description": "Ad Reward - Watched Video Ad",
-            "balance_after": new_balance,
-            "created_at": datetime.utcnow()
-        }
-        
-        insert_result = await db.transactions.insert_one(transaction_data)
-        logger.info(f"Transaction created with ID: {insert_result.inserted_id}")
-        
-        logger.info(f"User {current_user['id']} rewarded {reward_points} points for ad")
-        
-        # Return simple dict instead of MessageResponse model
-        return {
-            "message": "Ad reward credited successfully",
-            "data": {"new_balance": new_balance, "reward": reward_points}
-        }
-        
-    except Exception as e:
-        logger.error(f"Error in ads_rewarded: {e}")
-        import traceback
-        logger.error(f"Full traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Failed to credit ad reward: {str(e)}")
+    reward_points = 10.0
+    
+    new_balance = current_user.get("points_balance", 0.0) + reward_points
+    
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {"$set": {"points_balance": new_balance}}
+    )
+    
+    # Create transaction
+    transaction = Transaction(
+        user_id=current_user["id"],
+        amount=reward_points,
+        type=TransactionType.CREDIT,
+        description="Ad Reward - Watched Video Ad",
+        balance_after=new_balance
+    )
+    await db.transactions.insert_one(transaction.dict())
+    
+    logger.info(f"User {current_user['id']} rewarded 10 points for ad")
+    
+    return MessageResponse(
+        message="Ad reward credited successfully",
+        data={"new_balance": new_balance, "reward": reward_points}
+    )
 
 
 # ============= ROOM CLEANUP & COMPLETED GAMES =============
@@ -989,11 +806,10 @@ async def cleanup_rooms():
     """Cleanup old empty rooms (auto-called or manual)"""
     # Find rooms created > 1 hour ago AND (no players OR status is cancelled)
     one_hour_ago = datetime.utcnow() - timedelta(hours=1)
-    
     result = await db.rooms.delete_many({
         "$or": [
             {"created_at": {"$lt": one_hour_ago}, "current_players": 0},
-            {"status": RoomStatus.CANCELLED, "created_at": {"$lt": one_hour_ago}}
+            {"status": RoomStatus.CANCELLED.value, "created_at": {"$lt": one_hour_ago}}
         ]
     })
     
@@ -1005,7 +821,7 @@ async def cleanup_rooms():
 async def get_completed_rooms(limit: int = 10):
     """Get recently completed rooms with winners"""
     rooms = await db.rooms.find({
-        "status": RoomStatus.COMPLETED
+        "status": RoomStatus.COMPLETED.value
     }).sort("completed_at", -1).limit(limit).to_list(limit)
     
     # Serialize to remove ObjectId
@@ -1017,45 +833,51 @@ async def get_completed_rooms(limit: int = 10):
 @api_router.post("/game/{room_id}/start", response_model=MessageResponse)
 async def start_game(
     room_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
-    """Start the game (host only)"""
+    """Start the game (host only). Computes prize pool and distribution from tickets sold."""
     room = await db.rooms.find_one({"id": room_id})
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    
     if room["host_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Only host can start the game")
-    
-    if room["status"] != RoomStatus.WAITING:
+
+    if room.get("status") != RoomStatus.WAITING.value:
         raise HTTPException(status_code=400, detail="Game already started or completed")
-    
-    # Check minimum players
-    if room["current_players"] < room["min_players"]:
+
+    if room.get("current_players", 0) < room.get("min_players", 2):
         raise HTTPException(
             status_code=400,
-            detail=f"Need at least {room['min_players']} players to start"
+            detail=f"Need at least {room['min_players']} players to start",
         )
-    
-    # Update room status
+    tickets_sold = room.get("tickets_sold", 0)
+    if tickets_sold <= 0:
+        raise HTTPException(status_code=400, detail="No tickets sold. At least one ticket required to start.")
+    current_players = room.get("current_players", 0)
+    ticket_price = room.get("ticket_price", 0)
+    prize_pool = current_players * ticket_price
+    prize_distribution = compute_prize_distribution(prize_pool)
+
     await db.rooms.update_one(
         {"id": room_id},
         {
             "$set": {
-                "status": RoomStatus.ACTIVE,
-                "started_at": datetime.utcnow()
+                "status": RoomStatus.ACTIVE.value,
+                "started_at": datetime.utcnow(),
+                "prize_pool": prize_pool,
+                "prize_distribution": prize_distribution,
             }
-        }
+        },
     )
-    
-    # Broadcast via socket
-    await sio.emit('game_started', {
+
+    await sio.emit("game_started", {
         "room_id": room_id,
-        "started_at": datetime.utcnow().isoformat()
+        "started_at": datetime.utcnow().isoformat(),
+        "prize_pool": prize_pool,
+        "prize_distribution": prize_distribution,
     }, room=room_id)
-    
-    logger.info(f"Game started in room {room_id}")
-    
+
+    logger.info(f"Game started in room {room_id}, prize_pool={prize_pool}")
     return MessageResponse(message="Game started successfully")
 
 
@@ -1063,17 +885,15 @@ async def start_game(
 async def call_number_api(
     room_id: str,
     call_data: CallNumber,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
-    """Call a number (host only)"""
+    """Call a number (host only). Auto-marking and auto-claim are handled in socket handler."""
     room = await db.rooms.find_one({"id": room_id})
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    
     if room["host_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Only host can call numbers")
-    
-    if room["status"] != RoomStatus.ACTIVE:
+    if room.get("status") != RoomStatus.ACTIVE.value:
         raise HTTPException(status_code=400, detail="Game not active")
     
     called_numbers = room.get("called_numbers", [])
@@ -1123,48 +943,44 @@ async def call_number_api(
 async def claim_prize_api(
     room_id: str,
     claim: ClaimPrize,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
-    """Claim a prize with server-side validation"""
+    """Optional manual claim. Auto-claim is done in socket on number_called; use this for late claims if needed."""
     room = await db.rooms.find_one({"id": room_id})
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    
-    if room["status"] != RoomStatus.ACTIVE:
-        raise HTTPException(status_code=400, detail="Game not active")
-    
-    # Get ticket
+    if room.get("status") not in (RoomStatus.ACTIVE.value, RoomStatus.COMPLETED.value):
+        raise HTTPException(status_code=400, detail="Game not active or completed")
+
     ticket = await db.tickets.find_one({"id": claim.ticket_id})
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    
     if ticket["user_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Not your ticket")
-    
-    # Check if prize already claimed
+
+    prize_type_str = claim.prize_type.value if hasattr(claim.prize_type, "value") else str(claim.prize_type)
     existing_winner = await db.winners.find_one({
         "room_id": room_id,
-        "prize_type": claim.prize_type
+        "prize_type": prize_type_str,
     })
-    
-    prize_config = next((p for p in room["prizes"] if p["prize_type"] == claim.prize_type), None)
-    if not prize_config:
-        raise HTTPException(status_code=400, detail="Prize not configured")
-    
-    if existing_winner and not prize_config.get("multiple_winners", False):
+    if existing_winner:
         raise HTTPException(status_code=400, detail="Prize already claimed")
-    
-    # Validate win
+
     called_numbers = room.get("called_numbers", [])
-    is_valid = validate_win(ticket, called_numbers, claim.prize_type)
-    
-    if not is_valid:
+    if not validate_win(ticket, called_numbers, claim.prize_type):
         raise HTTPException(status_code=400, detail="Invalid claim - winning condition not met")
-    
-    # Get prize amount
-    prize_amount = prize_config["amount"]
-    
-    # Create winner record
+
+    distribution = room.get("prize_distribution") or {}
+    prize_amount = distribution.get(prize_type_str, 0.0)
+    if prize_amount <= 0:
+        for p in room.get("prizes", []):
+            pt = p.get("prize_type") or p.get("prize_type")
+            if (pt == prize_type_str or (hasattr(pt, "value") and pt.value == prize_type_str)):
+                prize_amount = p.get("amount", 0)
+                break
+    if prize_amount <= 0:
+        prize_amount = 10.0
+
     winner = Winner(
         user_id=current_user["id"],
         user_name=current_user["name"],
@@ -1174,284 +990,129 @@ async def claim_prize_api(
         prize_type=claim.prize_type,
         amount=prize_amount,
         verified=True,
-        verified_at=datetime.utcnow()
+        verified_at=datetime.utcnow(),
     )
     await db.winners.insert_one(winner.dict())
-    
-    # Credit wallet
-    new_balance = current_user.get("wallet_balance", 0.0) + prize_amount
+
+    try:
+        new_balance = await credit_points(
+            db,
+            current_user["id"],
+            prize_amount,
+            f"Won {prize_type_str} in {room['name']}",
+            room_id=room_id,
+            ticket_id=claim.ticket_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     await db.users.update_one(
         {"id": current_user["id"]},
-        {
-            "$set": {"wallet_balance": new_balance},
-            "$inc": {
-                "total_wins": 1,
-                "total_winnings": prize_amount
-            }
-        }
+        {"$inc": {"total_wins": 1, "total_winnings": prize_amount}},
     )
-    
-    # Create transaction
-    transaction = Transaction(
-        user_id=current_user["id"],
-        amount=prize_amount,
-        type=TransactionType.CREDIT,
-        description=f"Won {claim.prize_type.value} in {room['name']}",
-        balance_after=new_balance,
-        room_id=room_id,
-        ticket_id=claim.ticket_id
-    )
-    await db.transactions.insert_one(transaction.dict())
-    
-    # Update room winners
     await db.rooms.update_one(
         {"id": room_id},
-        {"$push": {"winners": winner.dict()}}
+        {"$push": {"winners": winner.dict()}},
     )
-    
-    # Broadcast via socket
-    await sio.emit('prize_won', {
-        "winner": winner.dict(),
-        "room_id": room_id
-    }, room=room_id)
-    
-    logger.info(f"User {current_user['id']} won {claim.prize_type} in room {room_id}")
-    
+
+    await sio.emit("prize_won", {"winner": winner.dict(), "room_id": room_id}, room=room_id)
+    logger.info(f"[PRIZE] Awarded {prize_type_str} amount={prize_amount} user={current_user['id']} room={room_id}")
     return MessageResponse(
-        message=f"Congratulations! You won {claim.prize_type.value}",
-        data={"winner": winner.dict(), "new_balance": new_balance}
+        message=f"Congratulations! You won {prize_type_str}",
+        data={"winner": winner.dict(), "points_balance": new_balance},
     )
 
 
 @api_router.get("/game/{room_id}/winners", response_model=List[Winner])
 async def get_winners(
     room_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
-    """Get winners for a room"""
+    """Get winners for a room."""
     winners = await db.winners.find({"room_id": room_id}).to_list(100)
-    return [Winner(**winner) for winner in winners]
+    return [Winner(**w) for w in winners]
+
+
+@api_router.get("/game/{room_id}/history")
+async def get_game_history(
+    room_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Game history for a completed room: winners, prize distribution, total pool, completed_at, final_results.
+    """
+    room = await db.rooms.find_one({"id": room_id})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    winners = await db.winners.find({"room_id": room_id}).to_list(100)
+    return {
+        "room_id": room_id,
+        "winners": [serialize_doc(w) for w in winners],
+        "prize_distribution": room.get("prize_distribution") or {},
+        "prize_pool": room.get("prize_pool", 0),
+        "completed_at": room.get("completed_at").isoformat() if room.get("completed_at") else None,
+        "final_results": room.get("final_results") or [],
+    }
+
+
+@api_router.get("/game/{room_id}/leaderboard")
+async def get_leaderboard(
+    room_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Leaderboard for the room: users sorted by total prize won (descending).
+    Returns list of { user_id, user_name, total_won, prizes: [...] }.
+    """
+    room = await db.rooms.find_one({"id": room_id})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    winners = await db.winners.find({"room_id": room_id}).to_list(100)
+    by_user: dict = {}
+    for w in winners:
+        uid = w.get("user_id")
+        if not uid:
+            continue
+        if uid not in by_user:
+            by_user[uid] = {"user_id": uid, "user_name": w.get("user_name", ""), "total_won": 0.0, "prizes": []}
+        amt = w.get("amount", 0) or 0
+        by_user[uid]["total_won"] += amt
+        by_user[uid]["prizes"].append({
+            "prize_type": w.get("prize_type"),
+            "amount": amt,
+            "ticket_id": w.get("ticket_id"),
+        })
+
+    leaderboard = sorted(by_user.values(), key=lambda x: -x["total_won"])
+    return leaderboard
 
 
 # ============= TICKET API =============
 @api_router.get("/tickets/my-tickets/{room_id}")
 async def get_my_tickets(
     room_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
-    """Get user's tickets for a specific room"""
+    """Get user's tickets for a room. Tickets are never regenerated; marked_numbers updated by server on number call."""
     try:
         tickets = await db.tickets.find({
             "room_id": room_id,
-            "user_id": current_user["id"]
+            "user_id": current_user["id"],
         }).to_list(100)
-        
-        logger.info(f"Found {len(tickets)} raw tickets for user {current_user['id']} in room {room_id}")
-        
-        # Enrich and serialize tickets
-        enriched_tickets = []
-        for idx, ticket in enumerate(tickets):
-            try:
-                # Remove MongoDB _id field FIRST
-                if "_id" in ticket:
-                    del ticket["_id"]
-                
-                # Log ticket structure for debugging
-                logger.info(f"Processing ticket {idx}: id={ticket.get('id')}, has_grid={('grid' in ticket)}, grid_type={type(ticket.get('grid'))}")
-                
-                # Add user_name if missing
-                if "user_name" not in ticket or not ticket.get("user_name"):
-                    ticket["user_name"] = current_user.get("name", "")
-                
-                # Validate and fix grid
-                if "grid" not in ticket or ticket["grid"] is None:
-                    logger.warning(f"Ticket {ticket.get('id')} has no grid, regenerating")
-                    # Generate a new grid for this ticket
-                    ticket_data = generate_tambola_ticket(ticket.get("ticket_number", idx + 1))
-                    ticket["grid"] = ticket_data["grid"]
-                    ticket["numbers"] = ticket_data["numbers"]
-                
-                # Ensure grid is a list
-                grid = ticket["grid"]
-                if not isinstance(grid, list):
-                    logger.error(f"Grid is not a list for ticket {ticket.get('id')}: {type(grid)}, regenerating")
-                    ticket_data = generate_tambola_ticket(ticket.get("ticket_number", idx + 1))
-                    ticket["grid"] = ticket_data["grid"]
-                    ticket["numbers"] = ticket_data["numbers"]
-                    grid = ticket["grid"]
-                
-                # Ensure grid has 3 rows
-                if len(grid) != 3:
-                    logger.error(f"Grid doesn't have 3 rows for ticket {ticket.get('id')}: {len(grid)}, regenerating")
-                    ticket_data = generate_tambola_ticket(ticket.get("ticket_number", idx + 1))
-                    ticket["grid"] = ticket_data["grid"]
-                    ticket["numbers"] = ticket_data["numbers"]
-                    grid = ticket["grid"]
-                
-                # Validate each row has 9 columns
-                for row_idx, row in enumerate(grid):
-                    if not isinstance(row, list) or len(row) != 9:
-                        logger.error(f"Row {row_idx} invalid for ticket {ticket.get('id')}, regenerating")
-                        ticket_data = generate_tambola_ticket(ticket.get("ticket_number", idx + 1))
-                        ticket["grid"] = ticket_data["grid"]
-                        ticket["numbers"] = ticket_data["numbers"]
-                        break
-                
-                # Extract numbers if missing
-                if "numbers" not in ticket or not ticket.get("numbers"):
-                    numbers = []
-                    for row in ticket["grid"]:
-                        if isinstance(row, list):
-                            for num in row:
-                                if num is not None and num != 0:
-                                    try:
-                                        numbers.append(int(num))
-                                    except (ValueError, TypeError):
-                                        logger.warning(f"Invalid number in grid: {num}")
-                    ticket["numbers"] = sorted(numbers)
-                
-                # Ensure marked_numbers exists
-                if "marked_numbers" not in ticket:
-                    ticket["marked_numbers"] = []
-                
-                # Ensure all required fields exist
-                if "id" not in ticket:
-                    ticket["id"] = str(uuid.uuid4())
-                if "ticket_number" not in ticket:
-                    ticket["ticket_number"] = idx + 1
-                if "room_id" not in ticket:
-                    ticket["room_id"] = room_id
-                if "user_id" not in ticket:
-                    ticket["user_id"] = current_user["id"]
-                
-                # Serialize to convert datetime to ISO string
-                serialized = serialize_doc(ticket)
-                enriched_tickets.append(serialized)
-                logger.info(f"Successfully processed ticket {ticket.get('id')}")
-                
-            except Exception as e:
-                logger.error(f"Error processing ticket {ticket.get('id', idx)}: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-                # Don't skip - try to create a minimal valid ticket
-                try:
-                    ticket_data = generate_tambola_ticket(idx + 1)
-                    minimal_ticket = {
-                        "id": ticket.get("id", str(uuid.uuid4())),
-                        "ticket_number": ticket.get("ticket_number", idx + 1),
-                        "user_id": current_user["id"],
-                        "user_name": current_user.get("name", ""),
-                        "room_id": room_id,
-                        "grid": ticket_data["grid"],
-                        "numbers": ticket_data["numbers"],
-                        "marked_numbers": []
-                    }
-                    enriched_tickets.append(serialize_doc(minimal_ticket))
-                    logger.info(f"Created minimal ticket for index {idx}")
-                except Exception as e2:
-                    logger.error(f"Failed to create minimal ticket: {e2}")
-                    continue
-        
-        logger.info(f"Returning {len(enriched_tickets)} valid tickets")
-        return enriched_tickets
+        out = []
+        for t in tickets:
+            if "_id" in t:
+                del t["_id"]
+            if not t.get("user_name") and t.get("user_id"):
+                t["user_name"] = current_user.get("name", "")
+            if "marked_numbers" not in t:
+                t["marked_numbers"] = []
+            out.append(serialize_doc(t))
+        return out
     except Exception as e:
         logger.error(f"Error fetching tickets: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        # Return empty array instead of error
         return []
-
-
-@api_router.post("/tickets/buy")
-async def buy_tickets(
-    room_id: str,
-    quantity: int,
-    current_user: dict = Depends(get_current_user)
-):
-    """Buy tickets for a room"""
-    try:
-        # Validate quantity
-        if quantity < 1 or quantity > 10:
-            raise HTTPException(status_code=400, detail="Quantity must be between 1 and 10")
-        
-        # Get room
-        room = await db.rooms.find_one({"id": room_id})
-        if not room:
-            raise HTTPException(status_code=404, detail="Room not found")
-        
-        # Check if room is still waiting
-        if room.get("status") != "waiting":
-            raise HTTPException(status_code=400, detail="Cannot buy tickets for a room that has started")
-        
-        # Calculate total cost
-        total_cost = room["ticket_price"] * quantity
-        
-        # Get user's wallet balance
-        wallet = await db.wallets.find_one({"user_id": current_user["id"]})
-        if not wallet:
-            raise HTTPException(status_code=400, detail="Wallet not found")
-        
-        balance = wallet.get("balance", 0)
-        if balance < total_cost:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Insufficient balance. Need ₹{total_cost}, have ₹{balance}"
-            )
-        
-        # Deduct from wallet
-        new_balance = balance - total_cost
-        await db.wallets.update_one(
-            {"user_id": current_user["id"]},
-            {"$set": {"balance": new_balance}}
-        )
-        
-        # Record transaction
-        transaction_id = str(uuid.uuid4())
-        await db.transactions.insert_one({
-            "id": transaction_id,
-            "user_id": current_user["id"],
-            "type": "debit",
-            "amount": total_cost,
-            "description": f"Bought {quantity} ticket(s) for room {room['name']}",
-            "created_at": datetime.utcnow()
-        })
-        
-        # Generate tickets
-        tickets_created = []
-        for i in range(quantity):
-            ticket_id = str(uuid.uuid4())
-            ticket_number = await db.tickets.count_documents({"room_id": room_id}) + 1
-            ticket_grid = generate_tambola_ticket(ticket_number)
-            
-            new_ticket = {
-                "id": ticket_id,
-                "room_id": room_id,
-                "user_id": current_user["id"],
-                "user_name": current_user["name"],  # Add user_name field
-                "ticket_number": ticket_number,
-                "grid": ticket_grid["grid"],  # Extract grid from result
-                "numbers": ticket_grid["numbers"],  # Extract numbers from result
-                "marked_numbers": [],
-                "created_at": datetime.utcnow()
-            }
-            
-            await db.tickets.insert_one(new_ticket)
-            # Serialize to remove ObjectId and convert datetime
-            tickets_created.append(serialize_doc(new_ticket))
-        
-        logger.info(f"User {current_user['id']} bought {quantity} tickets for room {room_id}")
-        
-        return {
-            "message": f"Successfully purchased {quantity} ticket(s)",
-            "tickets": tickets_created,
-            "new_balance": new_balance
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error buying tickets: {e}")
-        raise HTTPException(status_code=500, detail="Failed to purchase tickets")
 
 
 # Include router
@@ -1459,6 +1120,6 @@ app.include_router(api_router)
 
 if __name__ == "__main__":
     import uvicorn
-    # Use import string for reload; socket_app is the ASGI app
-    # Changed port to 8001 to avoid conflict with port 8000
-    uvicorn.run("server_multiplayer:socket_app", host="0.0.0.0", port=8001, reload=True)
+    # Do not use reload=True in production (causes random shutdowns)
+    use_reload = os.getenv("RELOAD", "false").lower() == "true"
+    uvicorn.run("server_multiplayer:socket_app", host="0.0.0.0", port=8001, reload=use_reload)
