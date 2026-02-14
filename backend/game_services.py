@@ -43,9 +43,10 @@ async def credit_points(
 ) -> float:
     """
     Credit points to user. Uses $inc for atomic balance update.
-    Creates a points transaction. Returns new balance.
+    Creates a points transaction. Returns new balance. Never use current_user snapshot.
     """
     from pymongo import ReturnDocument
+    logger.info(f"[CREDIT] Before: user_id={user_id} amount={amount} description={description}")
     result = await db.users.find_one_and_update(
         {"id": user_id},
         {"$inc": {"points_balance": amount}},
@@ -54,6 +55,7 @@ async def credit_points(
     if not result:
         raise ValueError(f"User not found: {user_id}")
     new_balance = result.get("points_balance", 0)
+    logger.info(f"[CREDIT] After: user_id={user_id} new_balance={new_balance}")
 
     txn = Transaction(
         user_id=user_id,
@@ -80,13 +82,14 @@ async def debit_points(
 ) -> float:
     """
     Debit points from user. Uses $inc for atomic balance update.
-    Fails if insufficient balance. Creates transaction. Returns new balance.
+    Fails if insufficient balance. Creates transaction. Returns new balance. Never use current_user snapshot.
     """
     from pymongo import ReturnDocument
     user = await db.users.find_one({"id": user_id})
     if not user:
         raise ValueError(f"User not found: {user_id}")
     current = user.get("points_balance", 0)
+    logger.info(f"[DEBIT] Before: user_id={user_id} current_balance={current} amount={amount} description={description}")
     if current < amount:
         raise ValueError(f"Insufficient points balance: have {current}, need {amount}")
 
@@ -98,6 +101,7 @@ async def debit_points(
     if not result:
         raise ValueError("Insufficient points balance or user not found")
     new_balance = result.get("points_balance", 0)
+    logger.info(f"[DEBIT] After: user_id={user_id} new_balance={new_balance}")
 
     txn = Transaction(
         user_id=user_id,

@@ -132,6 +132,7 @@ class Room(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    final_results: Optional[List[Dict[str, Any]]] = None  # Leaderboard at game end
 
 
 class RoomJoin(BaseModel):
@@ -142,7 +143,15 @@ class RoomJoin(BaseModel):
 # ============= TICKET MODELS =============
 class TicketPurchase(BaseModel):
     room_id: str
-    quantity: int = Field(default=1, ge=1, le=10)
+    quantity: int = Field(default=1, ge=1, le=5)
+
+
+# ============= AD REWARD MODELS =============
+class AdRewardRequest(BaseModel):
+    """Required from frontend for /ads/rewarded. Prevents unverified credits."""
+    ad_network: str = Field(..., min_length=1, max_length=50)
+    reward_token: str = Field(..., min_length=1)
+    reward_amount: float = Field(..., ge=1, le=100)
 
 
 class Ticket(BaseModel):

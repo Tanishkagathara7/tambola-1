@@ -75,20 +75,29 @@ async def _build_leaderboard(db, room_id):
 
 
 async def handle_game_completion(sio, db, room_id):
-    """Set room COMPLETED, increment total_games for players, emit game_completed and leaderboard."""
+    """Set room COMPLETED, completed_at, final_results; increment total_games for ALL players in room."""
     try:
         room = await db.rooms.find_one({"id": room_id})
         if not room:
             return
-        await db.rooms.update_one(
-            {"id": room_id},
-            {"$set": {"status": RoomStatus.COMPLETED.value, "completed_at": datetime.utcnow()}},
-        )
         winners = await db.winners.find({"room_id": room_id}).to_list(1000)
         prize_order = {"early_five": 1, "top_line": 2, "middle_line": 3, "bottom_line": 4, "four_corners": 5, "full_house": 6}
         sorted_winners = sorted(winners, key=lambda w: (prize_order.get(w.get("prize_type"), 999), w.get("claimed_at", datetime.utcnow())))
         serialized_winners = [serialize_doc(w) for w in sorted_winners]
         leaderboard = await _build_leaderboard(db, room_id)
+        await db.rooms.update_one(
+            {"id": room_id},
+            {
+                "$set": {
+                    "status": RoomStatus.COMPLETED.value,
+                    "completed_at": datetime.utcnow(),
+                    "final_results": leaderboard,
+                }
+            },
+        )
+        player_ids = [p.get("id") for p in room.get("players", []) if p.get("id")]
+        for uid in player_ids:
+            await db.users.update_one({"id": uid}, {"$inc": {"total_games": 1}})
         await sio.emit("game_completed", {
             "room_id": room_id,
             "winners": serialized_winners,
@@ -97,11 +106,7 @@ async def handle_game_completion(sio, db, room_id):
             "leaderboard": leaderboard,
         }, room=room_id)
         await sio.emit("leaderboard_updated", {"room_id": room_id, "leaderboard": leaderboard}, room=room_id)
-        for w in winners:
-            uid = w.get("user_id")
-            if uid:
-                await db.users.update_one({"id": uid}, {"$inc": {"total_games": 1}})
-        logger.info(f"Game completed in room {room_id} with {len(winners)} winners")
+        logger.info(f"Game completed in room {room_id} winners={len(winners)} final_results stored")
     except Exception as e:
         logger.error(f"Game completion error: {e}")
 
@@ -340,7 +345,7 @@ async def register_socket_events(sio: socketio.AsyncServer, db):
                     await sio.emit("leaderboard_updated", {"room_id": room_id, "leaderboard": leaderboard}, room=room_id)
                     if pt == PrizeType.FULL_HOUSE:
                         full_house_won = True
-                    logger.info(f"AUTO-CLAIMED {pt_str} for user {ticket['user_id']} in room {room_id}")
+                    logger.info(f"[PRIZE] Awarded {pt_str} amount={amount} user={ticket['user_id']} room={room_id}")
 
             await sio.emit("number_called", {
                 "number": number,

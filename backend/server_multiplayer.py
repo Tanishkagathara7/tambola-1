@@ -664,18 +664,21 @@ async def buy_tickets(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Purchase tickets. Body: { "room_id": string, "quantity": int } (quantity 1-10).
-    Room must exist and be WAITING. Uses points only; atomic debit.
+    Purchase tickets. Body: { "room_id": string, "quantity": int } (quantity 1-5).
+    Room must exist and be WAITING. Fetches user fresh; atomic debit; returns serialized tickets.
     """
     room = await db.rooms.find_one({"id": purchase.room_id})
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     if room.get("status") != RoomStatus.WAITING.value:
         raise HTTPException(status_code=400, detail="Cannot buy tickets after game starts")
-    if not (1 <= purchase.quantity <= 10):
-        raise HTTPException(status_code=400, detail="Quantity must be between 1 and 10")
+    if not (1 <= purchase.quantity <= 5):
+        raise HTTPException(status_code=400, detail="Quantity must be between 1 and 5")
     total_cost = room["ticket_price"] * purchase.quantity
-    points_balance = current_user.get("points_balance", 0)
+    user = await db.users.find_one({"id": current_user["id"]})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    points_balance = user.get("points_balance", 0)
     if points_balance < total_cost:
         raise HTTPException(
             status_code=400,
@@ -697,34 +700,40 @@ async def buy_tickets(
     for i in range(purchase.quantity):
         ticket_number = current_ticket_count + i + 1
         ticket_data = generate_tambola_ticket(ticket_number)
-        ticket = Ticket(
-            ticket_number=ticket_number,
-            user_id=current_user["id"],
-            user_name=current_user["name"],
-            room_id=purchase.room_id,
-            grid=ticket_data["grid"],
-            numbers=ticket_data["numbers"],
-        )
-        tickets.append(ticket.dict())
+        ticket_doc = {
+            "id": str(uuid.uuid4()),
+            "room_id": purchase.room_id,
+            "user_id": current_user["id"],
+            "user_name": current_user["name"],
+            "ticket_number": ticket_number,
+            "grid": ticket_data["grid"],
+            "numbers": ticket_data["numbers"],
+            "marked_numbers": [],
+        }
+        tickets.append(ticket_doc)
 
     await db.tickets.insert_many(tickets)
     await db.rooms.update_one(
         {"id": purchase.room_id},
         {"$inc": {"tickets_sold": purchase.quantity}},
     )
+    logger.info(f"[TICKET] Inserted {len(tickets)} tickets for user {current_user['id']} room {purchase.room_id}")
 
-    logger.info(f"User {current_user['id']} bought {purchase.quantity} tickets for room {purchase.room_id}")
+    serialized = [serialize_doc(t) for t in tickets]
     return MessageResponse(
         message=f"Successfully purchased {purchase.quantity} ticket(s)",
-        data={"tickets": tickets, "points_balance": new_balance},
+        data={"tickets": serialized, "points_balance": new_balance},
     )
 
 
 # ============= POINTS ROUTES =============
 @api_router.get("/points/balance")
 async def get_points_balance(current_user: dict = Depends(get_current_user)):
-    """Get current user points balance."""
-    return {"points_balance": current_user.get("points_balance", 0.0)}
+    """Get current user points balance. Always fetches fresh from DB."""
+    user = await db.users.find_one({"id": current_user["id"]})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"points_balance": user.get("points_balance", 0.0)}
 
 
 @api_router.post("/points/add-points", response_model=MessageResponse)
@@ -762,18 +771,59 @@ async def get_points_transactions(
 
 # ============= ADS ROUTES =============
 @api_router.post("/ads/rewarded", response_model=MessageResponse)
-async def ads_rewarded(current_user: dict = Depends(get_current_user)):
-    """Reward user for watching an ad (points only)."""
-    reward_points = 10.0
+async def ads_rewarded(
+    body: AdRewardRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Secure ad reward: requires ad_network, reward_token, reward_amount.
+    Stores request in DB; prevents duplicate within 30s per user; max 5 per hour.
+    Uses atomic $inc for points (never trust current_user snapshot).
+    """
+    user_id = current_user["id"]
+    now = datetime.utcnow()
+    # Duplicate token
+    existing = await db.ad_rewards.find_one({"reward_token": body.reward_token})
+    if existing:
+        raise HTTPException(status_code=400, detail="Reward already claimed for this token")
+    # Same user within 30 seconds
+    recent = await db.ad_rewards.find_one({
+        "user_id": user_id,
+        "created_at": {"$gte": now - timedelta(seconds=30)},
+    })
+    if recent:
+        raise HTTPException(status_code=400, detail="Please wait 30 seconds before next reward")
+    # Rate limit: max 5 per hour
+    one_hour_ago = now - timedelta(hours=1)
+    count = await db.ad_rewards.count_documents({
+        "user_id": user_id,
+        "created_at": {"$gte": one_hour_ago},
+    })
+    if count >= 5:
+        raise HTTPException(status_code=429, detail="Maximum 5 ad rewards per hour")
+
+    reward_doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "ad_network": body.ad_network,
+        "reward_token": body.reward_token,
+        "reward_amount": body.reward_amount,
+        "created_at": now,
+    }
+    await db.ad_rewards.insert_one(reward_doc)
+
     try:
         new_balance = await credit_points(
-            db, current_user["id"], reward_points, "Ad Reward - Watched Video Ad"
+            db,
+            user_id,
+            body.reward_amount,
+            f"Ad reward - {body.ad_network}",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return MessageResponse(
         message="Ad reward credited successfully",
-        data={"points_balance": new_balance, "reward": reward_points},
+        data={"points_balance": new_balance, "reward": body.reward_amount},
     )
 
 
@@ -980,8 +1030,8 @@ async def claim_prize_api(
             room_id=room_id,
             ticket_id=claim.ticket_id,
         )
-    except ValueError:
-        new_balance = current_user.get("points_balance", 0) + prize_amount
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     await db.users.update_one(
         {"id": current_user["id"]},
@@ -993,7 +1043,7 @@ async def claim_prize_api(
     )
 
     await sio.emit("prize_won", {"winner": winner.dict(), "room_id": room_id}, room=room_id)
-    logger.info(f"User {current_user['id']} claimed {prize_type_str} in room {room_id}")
+    logger.info(f"[PRIZE] Awarded {prize_type_str} amount={prize_amount} user={current_user['id']} room={room_id}")
     return MessageResponse(
         message=f"Congratulations! You won {prize_type_str}",
         data={"winner": winner.dict(), "points_balance": new_balance},
@@ -1008,6 +1058,28 @@ async def get_winners(
     """Get winners for a room."""
     winners = await db.winners.find({"room_id": room_id}).to_list(100)
     return [Winner(**w) for w in winners]
+
+
+@api_router.get("/game/{room_id}/history")
+async def get_game_history(
+    room_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Game history for a completed room: winners, prize distribution, total pool, completed_at, final_results.
+    """
+    room = await db.rooms.find_one({"id": room_id})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    winners = await db.winners.find({"room_id": room_id}).to_list(100)
+    return {
+        "room_id": room_id,
+        "winners": [serialize_doc(w) for w in winners],
+        "prize_distribution": room.get("prize_distribution") or {},
+        "prize_pool": room.get("prize_pool", 0),
+        "completed_at": room.get("completed_at").isoformat() if room.get("completed_at") else None,
+        "final_results": room.get("final_results") or [],
+    }
 
 
 @api_router.get("/game/{room_id}/leaderboard")
