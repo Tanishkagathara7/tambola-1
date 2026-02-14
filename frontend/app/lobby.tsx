@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,6 +8,7 @@ import {
   RefreshControl,
   Alert,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -15,6 +16,17 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../contexts/AuthContext';
 import { roomAPI, adsAPI } from '../services/api';
+
+let RewardedAd: any, TestIds: any, AdEventType: any;
+try {
+  const mobileAds = require('react-native-google-mobile-ads');
+  RewardedAd = mobileAds.RewardedAd;
+  TestIds = mobileAds.TestIds;
+  AdEventType = mobileAds.AdEventType;
+} catch {
+  RewardedAd = null;
+  TestIds = { REWARDED: 'ca-app-pub-3940256099942544/5224354917' };
+}
 
 interface Room {
   id: string;
@@ -81,6 +93,54 @@ export default function LobbyScreen() {
   };
 
   const [joiningRoomId, setJoiningRoomId] = useState<string | null>(null);
+  const [adLoading, setAdLoading] = useState(false);
+  const [adLoaded, setAdLoaded] = useState(false);
+  const rewardedAdRef = useRef<any>(null);
+  const REWARDED_ID = (TestIds && TestIds.REWARDED) ? TestIds.REWARDED : 'ca-app-pub-3940256099942544/5224354917';
+
+  useEffect(() => {
+    if (!RewardedAd || Platform.OS === 'web') return;
+    const ad = RewardedAd.createForAdRequest(REWARDED_ID, { requestNonPersonalizedAdsOnly: true });
+    rewardedAdRef.current = ad;
+    const unsubLoaded = ad.addAdEventListener(AdEventType?.LOADED ?? 'loaded', () => setAdLoaded(true));
+    ad.load();
+    return () => {
+      try { unsubLoaded?.(); } catch {}
+    };
+  }, []);
+
+  const handleWatchAd = async () => {
+    setAdLoading(true);
+    try {
+      if (RewardedAd && rewardedAdRef.current && adLoaded && Platform.OS !== 'web') {
+        const rewardToken = `admob_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const onEarned = () => {
+          adsAPI.watchRewarded({ ad_network: 'admob', reward_token: rewardToken, reward_amount: 10 })
+            .then(() => {
+              setAdLoaded(false);
+              rewardedAdRef.current?.load();
+              Alert.alert('Success', 'You earned 10 points!');
+            })
+            .catch((e: any) => Alert.alert('Error', e?.message || 'Failed to credit points'));
+        };
+        rewardedAdRef.current.addAdEventListener(AdEventType?.EARNED_REWARD ?? 'earned_reward', onEarned);
+        await rewardedAdRef.current.show();
+        setAdLoaded(false);
+        rewardedAdRef.current.load();
+      } else {
+        await adsAPI.watchRewarded({ ad_network: 'admob', reward_amount: 10 });
+        Alert.alert('Success', 'You earned 10 points!');
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error?.message || 'Ad not ready or failed. Try again.');
+      if (rewardedAdRef.current) {
+        setAdLoaded(false);
+        rewardedAdRef.current.load();
+      }
+    } finally {
+      setAdLoading(false);
+    }
+  };
 
   const handleJoinRoom = async (room: Room) => {
     if (joiningRoomId) return; // Prevent double click
@@ -128,19 +188,6 @@ export default function LobbyScreen() {
       } finally {
         setJoiningRoomId(null);
       }
-    }
-  };
-
-  const handleWatchAd = async () => {
-    try {
-      // In a real app, show ad here
-      await adsAPI.watchRewarded();
-      Alert.alert('Success', 'You earned 10 points!');
-      // Refresh user profile to update points
-      // useAuth().refreshProfile(); // Assuming this exists or simple context update
-      // Since context update might be async/complex, we let the context handle it if it listens or just wait for next profile fetch
-    } catch (error) {
-      Alert.alert('Error', 'Failed to watch ad');
     }
   };
 
@@ -235,11 +282,18 @@ export default function LobbyScreen() {
               <ActivityIndicator size="small" color="#FFD700" style={{ marginRight: 8 }} />
             )}
             <TouchableOpacity
-              style={styles.adButton}
+              style={[styles.adButton, (adLoading || (RewardedAd && !adLoaded)) && { opacity: 0.8 }]}
               onPress={handleWatchAd}
+              disabled={adLoading}
             >
-              <MaterialCommunityIcons name="play-circle" size={20} color="#1a5f1a" />
-              <Text style={styles.adButtonText}>+10 Pts</Text>
+              {adLoading ? (
+                <ActivityIndicator size="small" color="#1a5f1a" />
+              ) : (
+                <MaterialCommunityIcons name="play-circle" size={20} color="#1a5f1a" />
+              )}
+              <Text style={styles.adButtonText}>
+                {RewardedAd && !adLoaded && !adLoading ? 'Load ad' : '+10 Pts'}
+              </Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.walletButton}

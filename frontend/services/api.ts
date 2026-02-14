@@ -246,9 +246,25 @@ export const ticketAPI = {
 
 // ============= ADS API =============
 export const adsAPI = {
-  watchRewarded: async () => {
+  /**
+   * Backend requires: ad_network, reward_token, reward_amount.
+   * Call this after user completes a rewarded ad; pass the token from the ad SDK if available.
+   */
+  watchRewarded: async (params?: {
+    ad_network?: string;
+    reward_token?: string;
+    reward_amount?: number;
+  }) => {
+    const ad_network = params?.ad_network ?? 'admob';
+    const reward_token = params?.reward_token ?? `client_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const reward_amount = params?.reward_amount ?? 10;
     return apiFetch('/ads/rewarded', {
       method: 'POST',
+      body: JSON.stringify({
+        ad_network,
+        reward_token,
+        reward_amount,
+      }),
     });
   },
 };
