@@ -246,6 +246,16 @@ export const ticketAPI = {
 
 // ============= ADS API =============
 export const adsAPI = {
+  ping: async () => {
+    return apiFetch('/ads/ping', {
+      method: 'POST',
+    });
+  },
+  test: async () => {
+    return apiFetch('/ads/test', {
+      method: 'POST',
+    });
+  },
   watchRewarded: async () => {
     return apiFetch('/ads/rewarded', {
       method: 'POST',

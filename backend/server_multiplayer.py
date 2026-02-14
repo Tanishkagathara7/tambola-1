@@ -903,15 +903,43 @@ async def get_transactions(
 
 
 # ============= ADS ROUTES =============
-@api_router.post("/ads/rewarded", response_model=MessageResponse)
+@api_router.post("/ads/ping")
+async def ads_ping():
+    """Simple ping endpoint to test ads route"""
+    return {"message": "Ads endpoint is working", "timestamp": datetime.utcnow().isoformat()}
+
+@api_router.post("/ads/test")
+async def ads_test(current_user: dict = Depends(get_current_user)):
+    """Test endpoint to debug ads issues"""
+    try:
+        logger.info(f"Test endpoint called by user: {current_user}")
+        return {
+            "message": "Test successful",
+            "user_id": current_user.get("id"),
+            "user_data": {
+                "name": current_user.get("name"),
+                "email": current_user.get("email"),
+                "points_balance": current_user.get("points_balance", "NOT_SET"),
+                "has_points_balance": "points_balance" in current_user
+            }
+        }
+    except Exception as e:
+        logger.error(f"Test endpoint error: {e}")
+        return {"error": str(e)}
+
+@api_router.post("/ads/rewarded")
 async def ads_rewarded(current_user: dict = Depends(get_current_user)):
     """Reward user for watching an ad"""
     try:
+        logger.info(f"Ads endpoint called by user: {current_user.get('id', 'unknown')}")
+        
         reward_points = 10.0
         
         # Get current balance safely
         current_balance = float(current_user.get("points_balance", 0.0))
         new_balance = current_balance + reward_points
+        
+        logger.info(f"Current balance: {current_balance}, New balance: {new_balance}")
         
         # Validate balance values
         if current_balance < 0:
@@ -919,10 +947,12 @@ async def ads_rewarded(current_user: dict = Depends(get_current_user)):
             new_balance = reward_points
         
         # Update user balance
-        await db.users.update_one(
+        update_result = await db.users.update_one(
             {"id": current_user["id"]},
             {"$set": {"points_balance": new_balance}}
         )
+        
+        logger.info(f"User balance update result: {update_result.modified_count} documents modified")
         
         # Create transaction record
         transaction_data = {
@@ -935,17 +965,21 @@ async def ads_rewarded(current_user: dict = Depends(get_current_user)):
             "created_at": datetime.utcnow()
         }
         
-        await db.transactions.insert_one(transaction_data)
+        insert_result = await db.transactions.insert_one(transaction_data)
+        logger.info(f"Transaction created with ID: {insert_result.inserted_id}")
         
         logger.info(f"User {current_user['id']} rewarded {reward_points} points for ad")
         
-        return MessageResponse(
-            message="Ad reward credited successfully",
-            data={"new_balance": new_balance, "reward": reward_points}
-        )
+        # Return simple dict instead of MessageResponse model
+        return {
+            "message": "Ad reward credited successfully",
+            "data": {"new_balance": new_balance, "reward": reward_points}
+        }
         
     except Exception as e:
         logger.error(f"Error in ads_rewarded: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to credit ad reward: {str(e)}")
 
 

@@ -233,13 +233,22 @@ export default function LobbyScreen() {
 
   const handleWatchAd = async () => {
     if (!adsAvailable) {
-      // Fallback: directly call API for testing
+      // Fallback: Test the debug endpoints first
       try {
+        console.log('Testing ads ping endpoint...');
+        const pingResult = await adsAPI.ping();
+        console.log('Ping result:', pingResult);
+        
+        console.log('Testing ads test endpoint...');
+        const testResult = await adsAPI.test();
+        console.log('Test result:', testResult);
+        
+        console.log('Testing ads rewarded endpoint...');
         await adsAPI.watchRewarded();
         Alert.alert('Success!', 'You earned 10 points! (Test mode - no ad shown)');
-      } catch (error) {
-        console.error('Error crediting ad reward:', error);
-        Alert.alert('Error', 'Failed to credit reward points');
+      } catch (error: any) {
+        console.error('Error in ads test:', error);
+        Alert.alert('Debug Info', `Error: ${error.message}\nCheck console for details`);
       }
       return;
     }
